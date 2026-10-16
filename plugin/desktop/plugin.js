@@ -559,12 +559,18 @@ function RunboxEditor() {
     jsxs(
       'div',
       {
-        className: `group flex items-center gap-1 border-r border-(--ui-stroke-secondary) px-2 py-1 text-xs ${path === active ? 'text-(--ui-text-primary)' : 'text-(--ui-text-tertiary)'}`,
+        className: `flex items-center gap-1 border-r border-(--ui-stroke-secondary) px-2 py-1 text-xs ${path === active ? 'text-(--ui-text-primary)' : 'text-(--ui-text-tertiary)'}`,
         style: path === active ? { boxShadow: 'inset 0 -1px 0 var(--ui-accent)' } : undefined,
         children: [
           jsx('button', { type: 'button', className: 'font-mono', onClick: () => setActive(path), children: path }),
           dirty(path) ? jsx('span', { title: 'Unsaved', children: '●' }) : null,
-          jsx('button', { type: 'button', title: `Delete ${path}`, className: 'opacity-0 group-hover:opacity-60', onClick: () => setConfirm({ path }), children: '×' })
+          jsx('button', {
+            type: 'button',
+            title: `Delete ${path}`,
+            className: 'px-0.5 text-(--ui-text-tertiary) hover:text-(--ui-text-primary)',
+            onClick: () => setConfirm({ path }),
+            children: '×'
+          })
         ]
       },
       path
