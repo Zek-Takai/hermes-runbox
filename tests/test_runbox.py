@@ -217,6 +217,7 @@ def test_reset_wipes_files_and_container(rt):
 
 def test_idle_sweep_removes_boxes_then_stops_vm(rt):
     rt.docker.replies[("exec",)] = (0, "", "")
+    call(action="sync", files={"keep.py": "x = 1\n"})
     call(action="run", command="true")
     rt.docker.containers[engine.container_name("local-orphan")] = "running"
     now = time.time()
@@ -225,6 +226,8 @@ def test_idle_sweep_removes_boxes_then_stops_vm(rt):
     later = now + 16 * 60
     second = lifecycle.sweep(rt, now=later)
     assert second["removed"] == [engine.container_name(SID)] and second["vm_stopped"]
+    # The idle stop removes containers only: the workspace and its files stay.
+    assert (store.find_session(rt.root, SID) / "workspace" / "keep.py").read_text() == "x = 1\n"
     assert lifecycle.sweep(rt, now=later + 60) == {}
 
 
@@ -464,3 +467,15 @@ def test_test_falls_back_to_files_that_define_tests(rt):
     out = call(action="test")
     assert "report.py" in exec_.argvs[1] and "util.py" not in exec_.argvs[1]
     assert any("ran the tests defined in: report.py" in n for n in out["notes"])
+
+
+def test_reconcile_survives_a_deleted_data_folder(tmp_path, monkeypatch):
+    import shutil
+    import plugin as runbox_plugin
+    root = tmp_path / "data"
+    monkeypatch.setattr(runbox_plugin.tool, "runtime", tool.Runtime(root=root))
+    monkeypatch.setattr(runbox_plugin, "_state_db", lambda: tmp_path / "missing.db")
+    store.session_dir(root, SID)
+    shutil.rmtree(root)
+    runbox_plugin._reconcile_once()
+    assert (root / ".last_reconcile").exists()

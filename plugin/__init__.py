@@ -33,6 +33,7 @@ def _reconcile_once() -> None:
     try:
         if stamp.exists() and time.time() - stamp.stat().st_mtime < RECONCILE_INTERVAL_S:
             return
+        root.mkdir(parents=True, exist_ok=True)  # the data folder may have been deleted by hand
         stamp.touch()
         removed = store.reconcile(root, _state_db(), idle_days=tool.runtime.settings.idle_days,
                                   on_remove=_remove_container)
