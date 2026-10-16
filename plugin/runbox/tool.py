@@ -5,6 +5,7 @@ import contextvars
 import json
 import os
 import shutil
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -166,6 +167,18 @@ def handle(args, session_id=None, task_id=None, source="agent", **_kw) -> str:
         _BY.reset(token)
 
 
+def broadcast(event: str, payload: dict) -> None:
+    """Tell the Desktop tile what is happening (``plugin.runbox.<event>``). Only inside Hermes:
+    importing ``hermes_cli`` from a bare interpreter would re-exec it."""
+    if "hermes_cli" not in sys.modules:
+        return
+    try:
+        from hermes_cli.plugin_events import broadcast_plugin_event
+        broadcast_plugin_event("runbox", event, payload)
+    except Exception:
+        pass
+
+
 def _handle(args, session_id, task_id) -> str:
     action = (args.get("action") or "").strip()
     sid = str(session_id or task_id or "")
@@ -181,24 +194,33 @@ def _handle(args, session_id, task_id) -> str:
             path = store.session_dir(root, sid)
             store.touch(root, sid)
             mark_used(root)
-            if action == "sync":
-                return _sync(path, args)
-            if action == "stop":
-                return _ok(_stop(sid))
-            if action == "reset":
-                runtime.engine().remove(engine.container_name(sid))
-                for sub in ("workspace", "deps"):
-                    shutil.rmtree(path / sub, ignore_errors=True)
-                store.session_dir(root, sid)
-                return _ok({"reset": True, "workspace": str(path / "workspace")})
-            notes = _prepare(sid, path, container=action != "install")
-            result = {"run": _run, "check": _check, "test": _test, "install": _install}[action](sid, path, args)
-            result.setdefault("notes", [])
-            result["notes"] = notes + result["notes"]
-            store.touch(root, sid, force=True)  # a long run must not count as idle time
-            return json.dumps(result, ensure_ascii=False)
+            event = {"dir": path.name, "action": action, "by": _BY.get(), "command": str(args.get("command") or "")}
+            try:
+                broadcast("run.started", event)
+                return _act(action, sid, root, path, args)
+            finally:
+                broadcast("runs.updated", event)
     except (engine.RunboxError, store.StoreError, OSError) as exc:
         return _err(exc)
+
+
+def _act(action: str, sid: str, root: Path, path: Path, args) -> str:
+    if action == "sync":
+        return _sync(path, args)
+    if action == "stop":
+        return _ok(_stop(sid))
+    if action == "reset":
+        runtime.engine().remove(engine.container_name(sid))
+        for sub in ("workspace", "deps"):
+            shutil.rmtree(path / sub, ignore_errors=True)
+        store.session_dir(root, sid)
+        return _ok({"reset": True, "workspace": str(path / "workspace")})
+    notes = _prepare(sid, path, container=action != "install")
+    result = {"run": _run, "check": _check, "test": _test, "install": _install}[action](sid, path, args)
+    result.setdefault("notes", [])
+    result["notes"] = notes + result["notes"]
+    store.touch(root, sid, force=True)  # a long run must not count as idle time
+    return json.dumps(result, ensure_ascii=False)
 
 
 def _stop(sid: str) -> dict:

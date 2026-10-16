@@ -129,6 +129,4 @@ def act(dir_name: str, action: str, body: dict):
         if body.get(key) not in (None, "", []):
             args[key] = body[key]
     _runtime()
-    result = json.loads(tool.handle(args, session_id=session_id, source="desktop"))
-    _notify(dir_name)
-    return result
+    return json.loads(tool.handle(args, session_id=session_id, source="desktop"))  # the tool announces it

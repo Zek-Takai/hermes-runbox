@@ -329,4 +329,18 @@ def test_backend_files_runs_and_actions(rt, monkeypatch):
     assert runs[0]["command"] == "python main.py" and runs[0]["by"] == "desktop"
     assert client.delete(f"/sessions/{d}/file", params={"path": "main.py"}).json()["deleted"]
     assert client.get("/sessions/nope/files").status_code == 404
-    assert notified == [d, d, d]  # save, run, delete each refresh the tab
+    assert notified == [d, d]  # file save and delete refresh the tile; actions announce themselves
+
+
+def test_agent_actions_are_announced(rt, monkeypatch):
+    import types
+    sent = []
+    events = types.ModuleType("hermes_cli.plugin_events")
+    events.broadcast_plugin_event = lambda plugin, event, payload: sent.append((plugin, event, payload))
+    monkeypatch.setitem(sys.modules, "hermes_cli", types.ModuleType("hermes_cli"))
+    monkeypatch.setitem(sys.modules, "hermes_cli.plugin_events", events)
+    rt.docker.replies[("exec",)] = (0, "", "")
+    call(action="run", command="python main.py")
+    d = store.find_session(rt.root, SID).name
+    payload = {"dir": d, "action": "run", "by": "agent", "command": "python main.py"}
+    assert sent == [("runbox", "run.started", payload), ("runbox", "runs.updated", payload)]

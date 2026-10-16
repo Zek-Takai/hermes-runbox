@@ -12,6 +12,9 @@ let rest = null
 let pluginCtx = null
 const refreshListeners = new Set()
 const notifyRefresh = () => refreshListeners.forEach((fn) => fn())
+// The tool announces every action (the agent's too): run.started / runs.updated with { dir, action, by, command }.
+const activityListeners = new Set()
+const notifyActivity = (kind, payload) => activityListeners.forEach((fn) => fn(kind, payload || {}))
 const autoOpened = new Set()
 
 const LINE_PX = 20
@@ -342,6 +345,7 @@ function RunboxEditor() {
   const [error, setError] = useState('')
   const [newName, setNewName] = useState(null)
   const [confirm, setConfirm] = useState(null)
+  const [live, setLive] = useState(null) // an action in flight that this tile did not start
 
   const row =
     (rows || []).find((r) => r.dir === picked) || (rows || []).find((r) => r.session_id === focusedStored || r.session_id === focused) || null
@@ -415,6 +419,27 @@ function RunboxEditor() {
   useEffect(() => {
     if (active) void loadFile(active)
   }, [active, runs, loadFile])
+
+  // Follow the agent: show its action as it starts, then flip to its result.
+  useEffect(() => {
+    const onActivity = (kind, p) => {
+      if (!dir || p.dir !== dir || p.by !== 'agent') return
+      if (kind === 'started') {
+        if (['run', 'check', 'test', 'install'].includes(p.action)) {
+          setLive(p)
+          setTab(p.action === 'check' || p.action === 'test' ? 'problems' : 'output')
+        }
+      } else {
+        setLive(null)
+        if (p.action === 'run' || p.action === 'install') setTab('output')
+        else if (p.action === 'check' || p.action === 'test') setTab('problems')
+        void refreshBox()
+        void refresh()
+      }
+    }
+    activityListeners.add(onActivity)
+    return () => activityListeners.delete(onActivity)
+  }, [dir, refresh, refreshBox])
 
   useEffect(() => {
     if (!commandTouched) setCommand(active && active.endsWith('.py') ? `python ${active}` : '')
@@ -506,6 +531,9 @@ function RunboxEditor() {
         : null,
       row
         ? jsx('span', { className: 'text-[0.68rem] text-(--ui-text-quaternary)', style: running ? { color: OK_COLOR } : undefined, title: running ? 'Container running' : 'Starts on the next action', children: running ? '● running' : '○ stopped' })
+        : null,
+      live
+        ? jsx('span', { className: 'truncate text-[0.68rem]', style: { color: 'var(--ui-accent)' }, children: `agent is running ${live.action}${live.command ? `: ${live.command}` : ''}…` })
         : null,
       jsx('span', { className: 'flex-1' }),
       jsx(Button, { size: 'micro', variant: 'ghost', title: 'Refresh', onClick: () => notifyRefresh(), children: '↻' })
@@ -617,6 +645,10 @@ function RunboxEditor() {
         ? jsx(Button, { size: 'micro', variant: 'ghost', onClick: () => void sendToChat(row, runText(lastRun)), children: 'Send to chat' })
         : null
 
+  const liveNote = live
+    ? jsx('div', { className: 'px-3 py-1 font-mono text-xs', style: { color: 'var(--ui-accent)' }, children: `agent: ${live.action}${live.command ? ` $ ${live.command}` : ''} …` })
+    : null
+
   const panelBody =
     tab === 'problems'
       ? problems.length
@@ -662,7 +694,7 @@ function RunboxEditor() {
     children: [
       jsx('div', { onMouseDown: startDrag, style: { height: 4, cursor: 'row-resize', marginTop: -2 } }),
       jsx(PanelTabs, { tab, setTab, problems, children: sendButton }),
-      jsx('div', { className: 'min-h-0 flex-1 overflow-auto', children: panelBody })
+      jsx('div', { className: 'min-h-0 flex-1 overflow-auto', children: [liveNote, panelBody] })
     ]
   })
 
@@ -727,7 +759,11 @@ export default {
       }
       notifyRefresh()
     })
-    ctx.onEvent('plugin.runbox.runs.updated', () => notifyRefresh())
+    ctx.onEvent('plugin.runbox.run.started', (event) => notifyActivity('started', event?.payload))
+    ctx.onEvent('plugin.runbox.runs.updated', (event) => {
+      notifyActivity('finished', event?.payload)
+      notifyRefresh()
+    })
     ctx.registerMany([
       {
         id: 'runbox-titlebar',
