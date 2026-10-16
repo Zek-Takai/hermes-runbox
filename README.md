@@ -88,7 +88,15 @@ the title bar's box icon or **⌘K → Open runbox**.
   result in the chat's message box for you to send.
 - **Follows the agent:** while it works the header shows *agent is running test…*, then the panel
   switches to the result.
-- Shows the focused chat's box; a header menu shows another chat's.
+- Shows only the focused chat's box: each box belongs to the chat that made it.
+
+## The Runbox tab (Desktop)
+
+A tab beside **Files** and **Scratchpad** listing every box that exists, grouped like the chat
+sidebar (Today, Yesterday, Earlier this week, Last week, then by month), with boxes of deleted
+chats in their own group. Click a chat to open it (the editor follows); **×** deletes a box (its
+files, packages and container; the chat is not touched); **Clear** removes the boxes of deleted
+chats.
 
 ## Isolation
 

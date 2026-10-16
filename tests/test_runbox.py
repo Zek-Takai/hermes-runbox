@@ -575,3 +575,15 @@ def test_toolchain_install_requires_hashes(rt):
     assert out["success"] is False and "toolchain" in out["error"]
     (pip,) = rt.docker.ran("run", "--rm")
     assert "--require-hashes" in pip and "/target/.runbox-requirements.txt" in pip
+
+
+def test_backend_removes_boxes(rt, monkeypatch):
+    call(action="sync", files={"a.py": "1"})
+    json.loads(tool.handle({"action": "sync", "files": {"b.py": "2"}}, session_id="local-two"))
+    client, _ = _backend(rt, monkeypatch)
+    dirs = {r["session_id"]: r["dir"] for r in client.get("/sessions").json()["sessions"]}
+    assert client.delete(f"/sessions/{dirs[SID]}").json()["removed"]
+    assert any(c[1:3] == ["rm", "-f"] and c[3] == engine.container_name(SID) for c in rt.docker.calls)
+    assert client.post("/clear", json={"dirs": [dirs["local-two"], "nope"]}).json()["removed"] == [dirs["local-two"]]
+    assert client.get("/sessions").json()["sessions"] == []
+    assert client.post("/clear", json={"all": True}).status_code == 400

@@ -19,6 +19,7 @@ if _PKG not in sys.modules:
     sys.modules[_PKG] = _mod
     _spec.loader.exec_module(_mod)
 store = importlib.import_module(f"{_PKG}.store")
+engine = importlib.import_module(f"{_PKG}.engine")
 tool = importlib.import_module(f"{_PKG}.tool")
 
 UI_ACTIONS = ("run", "check", "test", "stop")
@@ -142,3 +143,36 @@ def act(dir_name: str, action: str, body: dict):
             args[key] = body[key]
     _runtime()
     return json.loads(tool.handle(args, session_id=session_id, source="desktop"))  # the tool announces it
+
+
+def _remove_box(entry: Path) -> None:
+    docker = _runtime().engine()
+    session_id = store.entry_session_id(entry)
+    if session_id and docker.socket_present():
+        docker.remove(engine.container_name(session_id))
+    store.remove_entry(entry)
+
+
+@router.delete("/sessions/{dir_name}")
+def remove_session(dir_name: str):
+    _remove_box(_entry(dir_name))
+    _notify(dir_name)
+    return {"dir": dir_name, "removed": True}
+
+
+@router.post("/clear")
+def clear(body: dict):
+    dirs = body.get("dirs")
+    if not isinstance(dirs, list) or not all(isinstance(d, str) for d in dirs):
+        raise HTTPException(status_code=400, detail='body needs {"dirs": [...]}')
+    removed = []
+    for dir_name in dirs:
+        try:
+            entry = store.entry_by_dir(_runtime().data_root(), dir_name)
+        except store.StoreError:
+            continue
+        _remove_box(entry)
+        removed.append(dir_name)
+    if removed:
+        _notify(removed[0])
+    return {"removed": removed}

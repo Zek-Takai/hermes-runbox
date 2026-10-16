@@ -4,7 +4,7 @@
 // actions as the agent's tool). Bottom panel: PROBLEMS, OUTPUT and RUNS, each sendable to chat.
 // It follows the focused chat; a header picker shows another chat's box. It opens by itself the
 // first time the agent uses runbox in a chat, and from the title bar or ⌘K "Open runbox".
-import { Button, EmptyState, Input, PALETTE_AREA, TITLEBAR_AREAS, host, icons, useValue } from '@hermes/plugin-sdk'
+import { Button, ConfirmDialog, EmptyState, Input, PALETTE_AREA, TITLEBAR_AREAS, host, icons, useValue } from '@hermes/plugin-sdk'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { jsx, jsxs } from 'react/jsx-runtime'
 
@@ -340,7 +340,6 @@ function RunboxEditor() {
   const focused = useValue(host.state.focusedSessionId)
   const [rows, setRows] = useState(null)
   const [titles, setTitles] = useState(new Map())
-  const [picked, setPicked] = useState(null)
   const [files, setFiles] = useState([])
   const [fileMeta, setFileMeta] = useState({}) // path -> { mtime, origin }
   const [openTabs, setOpenTabs] = useState([])
@@ -360,14 +359,8 @@ function RunboxEditor() {
   const [chooser, setChooser] = useState(null) // { path, remember } for the tab × choice
   const [live, setLive] = useState(null) // an action in flight that this tile did not start
 
-  // A chat picked in the header menu is shown until the user switches chats; then the tile
-  // follows the focused chat again.
-  useEffect(() => {
-    setPicked(null)
-  }, [focusedStored, focused])
-
-  const row =
-    (rows || []).find((r) => r.dir === picked) || (rows || []).find((r) => r.session_id === focusedStored || r.session_id === focused) || null
+  // A box belongs to the chat that made it: the editor shows only the focused chat's box.
+  const row = (rows || []).find((r) => r.session_id === focusedStored || r.session_id === focused) || null
   const dir = row?.dir
   editorDir = dir || null
 
@@ -591,22 +584,12 @@ function RunboxEditor() {
 
   const chatLabel = (r) => titles.get(r.session_id) || (r.exists === false ? 'Deleted chat' : 'Untitled chat')
 
-  // ----- header: chat picker + status
+  // ----- header: this chat + status
   const header = jsxs('div', {
     className: 'flex items-center gap-2 border-b border-(--ui-stroke-secondary) px-3 py-1.5',
     children: [
       jsx('span', { className: 'text-xs font-semibold tracking-wide text-(--ui-text-secondary)', children: 'RUNBOX' }),
-      rows && rows.length
-        ? jsx('select', {
-            className: 'min-w-0 max-w-64 truncate rounded border border-(--ui-stroke-secondary) bg-transparent px-1 py-0.5 text-xs text-(--ui-text-primary)',
-            value: row?.dir || '',
-            onChange: (e) => setPicked(e.target.value || null),
-            children: [
-              row ? null : jsx('option', { value: '', children: 'Pick a chat…' }, ''),
-              ...rows.map((r) => jsx('option', { value: r.dir, children: chatLabel(r) }, r.dir))
-            ]
-          })
-        : null,
+      row ? jsx('span', { className: 'min-w-0 max-w-64 truncate text-xs text-(--ui-text-primary)', title: 'This chat’s box', children: chatLabel(row) }) : null,
       row
         ? jsx('span', { className: 'text-[0.68rem] text-(--ui-text-quaternary)', style: running ? { color: OK_COLOR } : undefined, title: running ? 'Container running' : 'Starts on the next action', children: running ? '● running' : '○ stopped' })
         : null,
@@ -626,7 +609,7 @@ function RunboxEditor() {
         header,
         jsx(EmptyState, {
           title: error ? 'Could not load runbox' : 'This chat has no box yet',
-          description: error || 'The agent creates one when it first uses runbox in this chat. Pick another chat above to see its box.'
+          description: error || 'The agent creates one when it first uses runbox in this chat. Every box is listed in the Runbox tab beside Files.'
         })
       ]
     })
@@ -866,6 +849,173 @@ function RunboxEditor() {
   })
 }
 
+// --- the Runbox tab (beside Files): every box, grouped like the chat sidebar -------------------
+
+const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September',
+  'October', 'November', 'December']
+
+function bucketOf(seconds, now = new Date()) {
+  const day = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+  const weekStart = new Date(day)
+  weekStart.setDate(day.getDate() - ((day.getDay() + 6) % 7))
+  const lastWeekStart = new Date(weekStart)
+  lastWeekStart.setDate(weekStart.getDate() - 7)
+  const t = new Date(seconds * 1000)
+  if (t >= day) return 'Today'
+  const yesterday = new Date(day)
+  yesterday.setDate(day.getDate() - 1)
+  if (t >= yesterday) return 'Yesterday'
+  if (t >= weekStart) return 'Earlier this week'
+  if (t >= lastWeekStart) return 'Last week'
+  return t.getFullYear() === now.getFullYear() ? MONTHS[t.getMonth()] : `${MONTHS[t.getMonth()]} ${t.getFullYear()}`
+}
+
+function groupBoxes(rows) {
+  const order = []
+  const byLabel = new Map()
+  for (const row of rows) {
+    const label = row.exists === false ? 'Deleted chats' : bucketOf(row.last_active)
+    if (!byLabel.has(label)) {
+      byLabel.set(label, [])
+      order.push(label)
+    }
+    byLabel.get(label).push(row)
+  }
+  const labels = order.filter((l) => l !== 'Deleted chats')
+  if (byLabel.has('Deleted chats')) labels.push('Deleted chats')
+  return labels.map((label) => ({ label, rows: byLabel.get(label) }))
+}
+
+function BoxesPane() {
+  const [rows, setRows] = useState(null)
+  const [titles, setTitles] = useState(new Map())
+  const [error, setError] = useState('')
+  const [confirm, setConfirm] = useState(null)
+
+  const refresh = useCallback(async () => {
+    setError('')
+    try {
+      const [inv, names] = await Promise.all([rest('/sessions'), loadTitles()])
+      setRows(inv.sessions || [])
+      setTitles(names)
+    } catch (e) {
+      setError(String(e?.message || e))
+      setRows([])
+    }
+  }, [])
+
+  useEffect(() => {
+    void refresh()
+    refreshListeners.add(refresh)
+    const stop = pluginCtx.setInterval(() => void refresh(), 30000)
+    return () => {
+      refreshListeners.delete(refresh)
+      stop()
+    }
+  }, [refresh])
+
+  const removeBoxes = async (dirs) => {
+    try {
+      await rest('/clear', { method: 'POST', body: { dirs } })
+    } catch (e) {
+      host.notify({ kind: 'error', message: `runbox: ${e?.message || e}` })
+    }
+    setConfirm(null)
+    notifyRefresh()
+  }
+
+  const openBox = (row) => {
+    void host.openSession(row.session_id)
+    openEditor()
+  }
+
+  const deleted = (rows || []).filter((r) => r.exists === false)
+  const header = jsxs('div', {
+    className: 'flex items-center gap-1 px-3 pt-2 pb-1',
+    children: [
+      jsx('div', { className: 'mr-auto text-xs font-semibold tracking-wide text-(--ui-text-secondary)', children: 'RUNBOX' }),
+      jsx(Button, { size: 'micro', variant: 'ghost', title: 'Refresh', onClick: () => void refresh(), children: '↻' })
+    ]
+  })
+
+  const list =
+    rows === null
+      ? jsx('div', { className: 'p-3 text-xs text-(--ui-text-tertiary)', children: 'Loading…' })
+      : rows.length === 0
+        ? jsx(EmptyState, { title: error ? 'Could not load runbox' : 'No boxes yet', description: error || 'Each chat that uses runbox gets its own box; they are listed here.' })
+        : groupBoxes(rows).map((group) =>
+            jsxs(
+              'div',
+              {
+                className: 'pb-1',
+                children: [
+                  jsxs('div', {
+                    className: 'flex items-center px-3 pt-2 pb-0.5 text-[0.65rem] font-semibold tracking-wider text-(--ui-text-quaternary) uppercase',
+                    children: [
+                      jsx('span', { className: 'mr-auto', children: group.label }),
+                      group.label === 'Deleted chats'
+                        ? jsx(Button, { size: 'micro', variant: 'ghost', onClick: () => setConfirm({ kind: 'deleted' }), children: 'Clear' })
+                        : null
+                    ]
+                  }),
+                  ...group.rows.map((row) => {
+                    const gone = row.exists === false
+                    const title = gone ? 'Deleted chat' : titles.get(row.session_id) || 'Untitled chat'
+                    return jsxs(
+                      'div',
+                      {
+                        className: 'flex items-center gap-1 px-3 py-0.5',
+                        children: [
+                          jsx('button', {
+                            type: 'button',
+                            disabled: gone,
+                            className: 'min-w-0 flex-1 truncate text-left text-sm text-(--ui-text-primary) hover:underline disabled:no-underline disabled:text-(--ui-text-tertiary)',
+                            title: gone ? 'This chat was deleted' : 'Open this chat and its box',
+                            onClick: () => openBox(row),
+                            children: title
+                          }),
+                          jsx('span', {
+                            className: 'shrink-0 text-[0.65rem] text-(--ui-text-quaternary)',
+                            style: row.container === 'running' ? { color: OK_COLOR } : undefined,
+                            children: `${row.files} file${row.files === 1 ? '' : 's'}${row.container === 'running' ? ' · running' : ''}`
+                          }),
+                          jsx(Button, {
+                            size: 'micro',
+                            variant: 'ghost',
+                            className: 'text-(--ui-text-quaternary)',
+                            title: 'Delete this box (its files and container)',
+                            onClick: () => setConfirm({ kind: 'row', row, title }),
+                            children: '×'
+                          })
+                        ]
+                      },
+                      row.dir
+                    )
+                  })
+                ]
+              },
+              group.label
+            )
+          )
+
+  const dialog = confirm
+    ? jsx(ConfirmDialog, {
+        open: true,
+        destructive: true,
+        onClose: () => setConfirm(null),
+        title: confirm.kind === 'deleted' ? `Delete the boxes of ${deleted.length} deleted chat${deleted.length === 1 ? '' : 's'}?` : `Delete the box of “${confirm.title}”?`,
+        description: 'Its workspace files, installed packages and container are removed. The chat itself is not touched.',
+        confirmLabel: 'Delete',
+        onConfirm: () => removeBoxes(confirm.kind === 'deleted' ? deleted.map((r) => r.dir) : [confirm.row.dir])
+      })
+    : null
+
+  return jsxs('div', {
+    className: 'flex h-full flex-col overflow-hidden',
+    children: [header, jsx('div', { className: 'min-h-0 flex-1 overflow-y-auto', children: list }), dialog]
+  })
+}
+
 // --- registration ----------------------------------------------------------------------------
 
 function openEditor() {
@@ -916,6 +1066,13 @@ export default {
         id: 'runbox-titlebar',
         area: TITLEBAR_AREAS.right,
         data: { id: 'runbox-open', label: 'Runbox', icon: jsx(icons.Box, { size: 15 }), onSelect: () => openEditor() }
+      },
+      {
+        id: 'runbox-boxes-tab',
+        area: 'panes',
+        title: 'Runbox',
+        data: { placement: 'right', dock: { pane: 'files', pos: 'center' } },
+        render: () => jsx(BoxesPane, {})
       },
       {
         id: 'runbox-palette',
