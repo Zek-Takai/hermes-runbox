@@ -4,7 +4,7 @@
 // actions as the agent's tool). Bottom panel: PROBLEMS, OUTPUT and RUNS, each sendable to chat.
 // It follows the focused chat; a header picker shows another chat's box. It opens by itself the
 // first time the agent uses runbox in a chat, and from the title bar or ⌘K "Open runbox".
-import { Button, ConfirmDialog, EmptyState, Input, PALETTE_AREA, TITLEBAR_AREAS, host, icons, useValue } from '@hermes/plugin-sdk'
+import { Button, EmptyState, Input, PALETTE_AREA, TITLEBAR_AREAS, host, icons, useValue } from '@hermes/plugin-sdk'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { jsx, jsxs } from 'react/jsx-runtime'
 
@@ -339,7 +339,10 @@ function RunboxEditor() {
   const [titles, setTitles] = useState(new Map())
   const [picked, setPicked] = useState(null)
   const [files, setFiles] = useState([])
+  const [openTabs, setOpenTabs] = useState([])
   const [active, setActive] = useState(null)
+  const knownFiles = useRef(new Set())
+  const closedTabs = useRef(new Set())
   const [buffers, setBuffers] = useState({}) // path -> { saved, draft }
   const [runs, setRuns] = useState([])
   const [command, setCommand] = useState('')
@@ -350,7 +353,7 @@ function RunboxEditor() {
   const [jump, setJump] = useState(null)
   const [error, setError] = useState('')
   const [newName, setNewName] = useState(null)
-  const [confirm, setConfirm] = useState(null)
+  const [chooser, setChooser] = useState(null) // { path, remember } for the tab × choice
   const [live, setLive] = useState(null) // an action in flight that this tile did not start
 
   const row =
@@ -394,7 +397,15 @@ function RunboxEditor() {
       const list = (f.files || []).map((x) => x.path)
       setFiles(list)
       setRuns(r.runs || [])
-      setActive((cur) => (cur && list.includes(cur) ? cur : list.find((p) => p.endsWith('.py') && !p.split('/').pop().startsWith('test_')) || list[0] || null))
+      // Files that newly appear (the agent added them) open as tabs unless the user closed them.
+      const fresh = list.filter((p) => !knownFiles.current.has(p) && !closedTabs.current.has(p))
+      list.forEach((p) => knownFiles.current.add(p))
+      let tabs = []
+      setOpenTabs((cur) => {
+        tabs = [...cur.filter((p) => list.includes(p)), ...fresh.filter((p) => !cur.includes(p))]
+        return tabs
+      })
+      setActive((cur) => (cur && list.includes(cur) && tabs.includes(cur) ? cur : tabs.find((p) => p.endsWith('.py') && !p.split('/').pop().startsWith('test_')) || tabs[0] || null))
     } catch (e) {
       setError(String(e?.message || e))
     }
@@ -403,6 +414,9 @@ function RunboxEditor() {
   // Switching chats starts clean.
   useEffect(() => {
     setBuffers({})
+    setOpenTabs([])
+    knownFiles.current = new Set()
+    closedTabs.current = new Set()
     setActive(null)
     setCommandTouched(false)
     setJump(null)
@@ -487,9 +501,54 @@ function RunboxEditor() {
     }
   }
 
+  const openTab = (path) => {
+    closedTabs.current.delete(path)
+    setOpenTabs((cur) => (cur.includes(path) ? cur : [...cur, path]))
+    setActive(path)
+  }
+
+  const closeTab = (path) => {
+    closedTabs.current.add(path)
+    const rest_ = openTabs.filter((p) => p !== path)
+    setOpenTabs(rest_)
+    if (active === path) setActive(rest_[Math.max(0, openTabs.indexOf(path) - 1)] || null)
+  }
+
+  const deleteFile = async (path) => {
+    try {
+      await rest(fileUrl(dir, path), { method: 'DELETE' })
+    } catch (e) {
+      host.notify({ kind: 'error', message: `runbox: ${e?.message || e}` })
+      return
+    }
+    closeTab(path)
+    setBuffers((b) => {
+      const { [path]: _gone, ...kept } = b
+      return kept
+    })
+    notifyRefresh()
+  }
+
+  // The tab ×: close the tab or delete the file; a remembered choice skips the question.
+  const onTabX = (path) => {
+    const remembered = pluginCtx.storage?.get?.('closeChoice', null)
+    if (remembered === 'close') closeTab(path)
+    else if (remembered === 'delete') void deleteFile(path)
+    else setChooser({ path, remember: false })
+  }
+
+  const choose = (choice) => {
+    const { path, remember } = chooser
+    setChooser(null)
+    if (choice === 'cancel') return
+    if (remember) pluginCtx.storage?.set?.('closeChoice', choice)
+    if (choice === 'close') closeTab(path)
+    else void deleteFile(path)
+  }
+
   const goTo = (issue) => {
     if (!issue.file || !files.includes(issue.file)) return
-    setActive(issue.file)
+    openTab(issue.file)
     setJump({ line: issue.line, at: Date.now() })
   }
 
@@ -500,7 +559,7 @@ function RunboxEditor() {
     try {
       await rest(fileUrl(dir, name), { method: 'PUT', body: { content: '' } })
       await refreshBox()
-      setActive(name)
+      openTab(name)
     } catch (e) {
       host.notify({ kind: 'error', message: `Could not create ${name}: ${e?.message || e}` })
     }
@@ -573,9 +632,9 @@ function RunboxEditor() {
           dirty(path) ? jsx('span', { title: 'Unsaved', children: '●' }) : null,
           jsx('button', {
             type: 'button',
-            title: `Delete ${path}`,
+            title: `Close ${path}`,
             className: 'px-0.5 text-(--ui-text-tertiary) hover:text-(--ui-text-primary)',
-            onClick: () => setConfirm({ path }),
+            onClick: () => onTabX(path),
             children: '×'
           })
         ]
@@ -583,17 +642,30 @@ function RunboxEditor() {
       path
     )
 
+  const remembered = pluginCtx.storage?.get?.('closeChoice', null)
+  const fileMenu = jsx('select', {
+    className: 'm-1 shrink-0 rounded border border-(--ui-stroke-secondary) bg-transparent px-1 py-0.5 text-xs text-(--ui-text-secondary)',
+    title: 'Every file in this chat’s box',
+    value: '',
+    onChange: (e) => {
+      const v = e.target.value
+      if (v === '__reset__') {
+        pluginCtx.storage?.set?.('closeChoice', null)
+        host.notify({ kind: 'success', message: 'The tab × will ask again' })
+      } else if (v) openTab(v)
+    },
+    children: [
+      jsx('option', { value: '', children: `Files (${files.length}) ▾` }, ''),
+      ...files.map((p) => jsx('option', { value: p, children: `${openTabs.includes(p) ? '• ' : '  '}${p}${dirty(p) ? ' ●' : ''}` }, p)),
+      remembered ? jsx('option', { value: '__reset__', children: `Reset tab × choice (now: ${remembered === 'close' ? 'close tab' : 'delete file'})` }, '__reset__') : null
+    ]
+  })
+
   const tabsRow = jsxs('div', {
     className: 'flex items-center overflow-x-auto border-b border-(--ui-stroke-secondary)',
     children: [
-      files.length > 8
-        ? jsx('select', {
-            className: 'm-1 rounded border border-(--ui-stroke-secondary) bg-transparent px-1 py-0.5 font-mono text-xs',
-            value: active || '',
-            onChange: (e) => setActive(e.target.value),
-            children: files.map((p) => jsx('option', { value: p, children: `${p}${dirty(p) ? ' ●' : ''}` }, p))
-          })
-        : files.map(fileTab),
+      fileMenu,
+      ...openTabs.map(fileTab),
       newName !== null
         ? jsx(Input, {
             autoFocus: true,
@@ -635,7 +707,10 @@ function RunboxEditor() {
   })
 
   const editor = !active
-    ? jsx(EmptyState, { title: 'No files yet', description: 'Files the agent syncs into runbox show here. Use + to start one.' })
+    ? jsx(EmptyState, {
+        title: files.length ? 'No file open' : 'No files yet',
+        description: files.length ? 'Open one from the Files menu.' : 'Files the agent syncs into runbox show here. Use + to start one.'
+      })
     : !buf
       ? jsx('div', { className: 'p-3 text-xs text-(--ui-text-tertiary)', children: 'Loading…' })
       : buf.error
@@ -711,32 +786,40 @@ function RunboxEditor() {
     ]
   })
 
-  const dialog = confirm
-    ? jsx(ConfirmDialog, {
-        open: true,
-        destructive: true,
-        onClose: () => setConfirm(null),
-        title: `Delete ${confirm.path}?`,
-        description: 'The file is removed from this chat’s runbox workspace.',
-        confirmLabel: 'Delete',
-        onConfirm: async () => {
-          try {
-            await rest(fileUrl(dir, confirm.path), { method: 'DELETE' })
-          } catch (e) {
-            host.notify({ kind: 'error', message: `runbox: ${e?.message || e}` })
-          }
-          setBuffers((b) => {
-            const { [confirm.path]: _gone, ...rest_ } = b
-            return rest_
-          })
-          setConfirm(null)
-          notifyRefresh()
-        }
+  const dialog = chooser
+    ? jsx('div', {
+        className: 'absolute inset-0 z-10 flex items-center justify-center',
+        style: { background: 'color-mix(in srgb, black 35%, transparent)' },
+        onClick: () => choose('cancel'),
+        children: jsxs('div', {
+          className: 'w-80 rounded-lg border border-(--ui-stroke-secondary) p-4 text-sm shadow-lg',
+          style: { background: 'var(--ui-editor-background, var(--background, #1e1e1e))' },
+          onClick: (e) => e.stopPropagation(),
+          children: [
+            jsx('div', { className: 'mb-1 font-semibold text-(--ui-text-primary)', children: `Close ${chooser.path}?` }),
+            jsx('div', { className: 'mb-3 text-xs text-(--ui-text-tertiary)', children: 'Close tab keeps the file in the box (reopen it from Files). Delete file removes it from the box.' }),
+            jsxs('label', {
+              className: 'mb-3 flex items-center gap-2 text-xs text-(--ui-text-secondary)',
+              children: [
+                jsx('input', { type: 'checkbox', checked: chooser.remember, onChange: (e) => setChooser({ ...chooser, remember: e.target.checked }) }),
+                'Remember my choice (reset it from the Files menu)'
+              ]
+            }),
+            jsxs('div', {
+              className: 'flex justify-end gap-2',
+              children: [
+                jsx(Button, { size: 'xs', variant: 'ghost', onClick: () => choose('cancel'), children: 'Cancel' }),
+                jsx(Button, { size: 'xs', variant: 'ghost', onClick: () => choose('delete'), style: { color: FAIL_COLOR }, children: 'Delete file' }),
+                jsx(Button, { size: 'xs', onClick: () => choose('close'), children: 'Close tab' })
+              ]
+            })
+          ]
+        })
       })
     : null
 
   return jsxs('div', {
-    className: 'flex h-full flex-col overflow-hidden',
+    className: 'relative flex h-full flex-col overflow-hidden',
     children: [header, tabsRow, toolbar, jsx('div', { className: 'flex min-h-0 flex-1 flex-col', children: editor }), panel, dialog]
   })
 }

@@ -13,7 +13,7 @@ from pathlib import Path, PurePosixPath
 
 from . import engine, issues, lifecycle, store
 
-ACTIONS = ("sync", "run", "check", "test", "install", "status", "stop", "reset")
+ACTIONS = ("sync", "run", "check", "test", "install", "export", "status", "stop", "reset")
 
 SCHEMA = {
     "name": "runbox",
@@ -23,7 +23,9 @@ SCHEMA = {
         "via paths, e.g. scratchpad buffers, or inline files), then: run (a shell command in "
         "/workspace), check (ruff lint + syntax), test (pytest). check/test/run failures come back "
         "as a plain issue list ('file:line: CODE message'). install adds PyPI packages (asks the "
-        "user first: it needs network). status shows the box; stop frees it (files kept; on macOS "
+        "user first: it needs network). export writes changed files back to the folders they were synced "
+        "from (or to dest), through write_file, skipping files changed on the host since the sync "
+        "unless overwrite. status shows the box; stop frees it (files kept; on macOS "
         "it also stops the runbox VM when no other chat is using it); reset wipes the workspace "
         "and packages. The container starts on demand and stops when idle."
     ),
@@ -44,6 +46,10 @@ SCHEMA = {
             "packages": {"type": "array", "items": {"type": "string"},
                          "description": "install: PyPI requirement specs, e.g. ['requests', 'numpy<3']."},
             "timeout": {"type": "integer", "description": "run/test: seconds (default 120, max 600)."},
+            "dest": {"type": "string",
+                     "description": "export: absolute or ~ folder to write to instead of where files came from."},
+            "overwrite": {"type": "boolean",
+                          "description": "export: also replace host files that changed since the sync."},
         },
         "required": ["action"],
     },
@@ -96,6 +102,13 @@ class Runtime:
 
 
 runtime = Runtime()
+_ctx = None
+
+
+def bind(ctx) -> None:
+    """Hermes' plugin context: export writes through its ``write_file``."""
+    global _ctx
+    _ctx = ctx
 _BY = contextvars.ContextVar("runbox_by", default="agent")  # who started a run: agent or desktop
 
 _SETTING_TYPES = {"image": str, "idle_minutes": float, "idle_days": float, "memory": str, "cpus": float,
@@ -207,6 +220,8 @@ def _handle(args, session_id, task_id) -> str:
 def _act(action: str, sid: str, root: Path, path: Path, args) -> str:
     if action == "sync":
         return _sync(path, args)
+    if action == "export":
+        return _ok(_export(path, args))
     if action == "stop":
         return _ok(_stop(sid))
     if action == "reset":
@@ -274,14 +289,14 @@ def _safe_rel(rel: str) -> PurePosixPath:
     return p
 
 
-def _copy_tree(src: Path, dest: Path, budget: dict) -> None:
+def _copy_tree(src: Path, dest: Path, budget: dict, copied: list) -> None:
     for entry in sorted(src.iterdir()):
         if entry.name in SKIP_NAMES or entry.is_symlink():
             continue
         target = dest / entry.name
         if entry.is_dir():
             target.mkdir(exist_ok=True)
-            _copy_tree(entry, target, budget)
+            _copy_tree(entry, target, budget, copied)
         elif entry.is_file():
             budget["files"] += 1
             budget["bytes"] += entry.stat().st_size
@@ -289,28 +304,41 @@ def _copy_tree(src: Path, dest: Path, budget: dict) -> None:
                 raise store.StoreError(
                     f"sync is limited to {SYNC_MAX_FILES} files / {SYNC_MAX_BYTES // (1024 * 1024)} MB")
             shutil.copy2(entry, target)
+            copied.append((target, entry))
 
 
 def _sync(path: Path, args) -> str:
     workspace = path / "workspace"
+    sources = store.read_sources(path)
     if args.get("clean"):
         shutil.rmtree(workspace, ignore_errors=True)
         workspace.mkdir()
+        sources = {"origins": {}, "roots": []}
     budget = {"files": 0, "bytes": 0}
     copied = []
     for raw in args.get("paths") or []:
         src = Path(os.path.expanduser(str(raw)))
         if not src.is_absolute():
             raise store.StoreError(f"sync path {raw!r} must be absolute or start with ~")
+        pairs: list = []
         if src.is_dir():
-            _copy_tree(src, workspace, budget)
+            _copy_tree(src, workspace, budget, pairs)
+            if str(src) not in sources["roots"]:
+                sources["roots"].append(str(src))
         elif src.is_file():
             budget["files"] += 1
             budget["bytes"] += src.stat().st_size
             shutil.copy2(src, workspace / src.name)
+            pairs.append((workspace / src.name, src))
         else:
             raise store.StoreError(f"{src} does not exist")
+        for target, origin in pairs:
+            # Remember where each file came from (and its content) so export can write it back.
+            sources["origins"][target.relative_to(workspace).as_posix()] = {
+                "host": str(origin), "sha": store.sha256_file(target)}
         copied.append(str(src))
+    if copied:
+        store.write_sources(path, sources)
     written = []
     files = args.get("files") or {}
     if not isinstance(files, dict):
@@ -324,6 +352,85 @@ def _sync(path: Path, args) -> str:
         written.append(str(_safe_rel(rel)))
     return _ok({"workspace": str(workspace), "copied": copied, "written": written,
                 "files": _listing(workspace)})
+
+
+# --- export ----------------------------------------------------------------------------------
+
+def _export(path: Path, args) -> dict:
+    """Write changed workspace files back to where they were synced from (or under ``dest``)."""
+    workspace = path / "workspace"
+    sources = store.read_sources(path)
+    origins, roots = sources["origins"], sources["roots"]
+    overwrite = bool(args.get("overwrite"))
+    dest_root = None
+    if args.get("dest"):
+        dest_root = Path(os.path.expanduser(str(args["dest"])))
+        if not dest_root.is_absolute():
+            raise store.StoreError("export dest must be absolute or start with ~")
+    explicit = _rel_paths(args)
+    wanted = explicit or [p for p in _listing(workspace, limit=SYNC_MAX_FILES) if p != "..."]
+    plan, unchanged, conflicts, skipped = [], [], [], []
+    for rel in wanted:
+        src = workspace / rel
+        if not src.is_file():
+            skipped.append(f"{rel}: not in the workspace")
+            continue
+        sha = store.sha256_file(src)
+        origin = origins.get(rel)
+        if dest_root is not None:
+            target, base = dest_root / rel, None
+        elif origin:
+            if origin.get("sha") == sha:
+                unchanged.append(rel)
+                continue
+            target, base = Path(origin["host"]), origin.get("sha")
+        elif len(roots) == 1:
+            target, base = Path(roots[0]) / rel, None  # a new file inside the synced folder
+        else:
+            if explicit:
+                skipped.append(f"{rel}: not synced from a folder; pass dest")
+            continue
+        if target.exists():
+            host_sha = store.sha256_file(target)
+            if host_sha == sha:
+                unchanged.append(rel)
+                continue
+            if host_sha != base and not overwrite:
+                conflicts.append(f"{rel}: {target} changed on the host since the sync (set overwrite to replace it)")
+                continue
+        try:
+            text = src.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            skipped.append(f"{rel}: not a text file")
+            continue
+        plan.append((rel, target, text, sha))
+    exported, failed = [], []
+    if plan and _ctx is None:
+        raise engine.RunboxError("export writes through Hermes' write_file; it is only available to the agent")
+    for rel, target, text, sha in plan:
+        reply = _maybe_json(_ctx.dispatch_tool("write_file", {"path": str(target), "content": text}))
+        error = reply.get("error") if isinstance(reply, dict) else None
+        if error or (isinstance(reply, dict) and reply.get("success") is False):
+            failed.append(f"{rel}: {error or reply}")
+            continue
+        exported.append({"file": rel, "to": str(target)})
+        if dest_root is None:
+            origins[rel] = {"host": str(target), "sha": sha}
+    if exported and dest_root is None:
+        store.write_sources(path, {"origins": origins, "roots": roots})
+    result = {"exported": exported, "unchanged": len(unchanged), "conflicts": conflicts,
+              "skipped": skipped, "failed": failed, "ok": not conflicts and not failed}
+    lines = [f"{e['file']} -> {e['to']}" for e in exported] + conflicts + skipped + failed
+    _record(path, "export", {**result, "output": "\n".join(lines) or "nothing to export"},
+            command=str(dest_root or "back to synced folders"))
+    return result
+
+
+def _maybe_json(raw):
+    try:
+        return json.loads(raw)
+    except (TypeError, ValueError):
+        return raw
 
 
 def _listing(workspace: Path, limit: int = 200) -> list[str]:

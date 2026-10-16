@@ -290,6 +290,30 @@ def delete_file(entry: Path, rel: str) -> dict:
     return {"path": rel, "deleted": True}
 
 
+# --- import origins (sync -> export) -------------------------------------------------------
+
+_SOURCES = "sources.json"
+
+
+def read_sources(entry: Path) -> dict:
+    """``{"origins": {rel: {"host", "sha"}}, "roots": [host dirs]}`` recorded by sync."""
+    try:
+        data = json.loads((entry / _SOURCES).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        data = {}
+    return {"origins": dict(data.get("origins") or {}), "roots": list(data.get("roots") or [])}
+
+
+def write_sources(entry: Path, data: dict) -> None:
+    tmp = entry / (_SOURCES + ".tmp")
+    tmp.write_text(json.dumps(data), encoding="utf-8")
+    tmp.replace(entry / _SOURCES)
+
+
+def sha256_file(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
 def remove_entry(entry: Path) -> None:
     shutil.rmtree(entry, ignore_errors=True)
 

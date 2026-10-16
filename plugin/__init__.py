@@ -60,6 +60,7 @@ def _loop() -> None:
 def register(ctx):
     global _threads_started
     s = tool.apply_settings(tool.runtime.settings, lambda key, default: ctx.get_config(key, default=default))
+    tool.bind(ctx)
     ctx.register_tool(name="runbox", toolset="runbox", schema=tool.SCHEMA, handler=tool.handle)
     ctx.register_hook("pre_tool_call", tool.pre_tool_call)
     ctx.register_hook("pre_llm_call", lambda **kw: guidance.reminder(s.hint, **kw))

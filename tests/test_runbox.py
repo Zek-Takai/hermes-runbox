@@ -344,3 +344,53 @@ def test_agent_actions_are_announced(rt, monkeypatch):
     d = store.find_session(rt.root, SID).name
     payload = {"dir": d, "action": "run", "by": "agent", "command": "python main.py"}
     assert sent == [("runbox", "run.started", payload), ("runbox", "runs.updated", payload)]
+
+
+class WriteCtx:
+    def __init__(self):
+        self.writes = []
+
+    def dispatch_tool(self, name, args):
+        assert name == "write_file"
+        self.writes.append(args["path"])
+        Path(args["path"]).parent.mkdir(parents=True, exist_ok=True)
+        Path(args["path"]).write_text(args["content"])
+        return json.dumps({"success": True})
+
+
+def test_export_writes_changes_back_to_the_project(rt, tmp_path, monkeypatch):
+    proj = tmp_path / "proj"
+    (proj / "pkg").mkdir(parents=True)
+    (proj / "main.py").write_text("print(1)\n")
+    (proj / "pkg" / "util.py").write_text("x = 1\n")
+    (proj / "notes.txt").write_text("keep\n")
+    call(action="sync", paths=[str(proj)])
+    ws = store.find_session(rt.root, SID) / "workspace"
+    (ws / "main.py").write_text("print(2)\n")          # edited in the box
+    (ws / "pkg" / "new.py").write_text("y = 2\n")      # created in the box
+    (ws / "notes.txt").write_text("box edit\n")
+    (proj / "notes.txt").write_text("host edit\n")     # changed on the host meanwhile
+    ctx = WriteCtx()
+    monkeypatch.setattr(tool, "_ctx", ctx)
+    out = call(action="export")
+    assert sorted(e["file"] for e in out["exported"]) == ["main.py", "pkg/new.py"]
+    assert (proj / "main.py").read_text() == "print(2)\n" and (proj / "pkg" / "new.py").exists()
+    assert out["unchanged"] == 1 and len(out["conflicts"]) == 1 and "notes.txt" in out["conflicts"][0]
+    assert (proj / "notes.txt").read_text() == "host edit\n" and out["ok"] is False
+    again = call(action="export")
+    assert again["exported"] == [] and again["unchanged"] == 3
+    forced = call(action="export", paths=["notes.txt"], overwrite=True)
+    assert [e["file"] for e in forced["exported"]] == ["notes.txt"]
+    assert (proj / "notes.txt").read_text() == "box edit\n"
+
+
+def test_export_to_dest_and_without_hermes(rt, tmp_path, monkeypatch):
+    call(action="sync", files={"a.py": "1\n"})
+    assert "only available to the agent" in call(action="export", dest=str(tmp_path / "out"))["error"]
+    ctx = WriteCtx()
+    monkeypatch.setattr(tool, "_ctx", ctx)
+    out = call(action="export", dest=str(tmp_path / "out"))
+    assert out["exported"] == [{"file": "a.py", "to": str(tmp_path / "out" / "a.py")}]
+    assert call(action="export", dest="relative/dir")["success"] is False
+    runs = store.recent_runs(store.find_session(rt.root, SID))
+    assert runs[-1]["action"] == "export"
