@@ -119,16 +119,32 @@ the title bar's box icon or **⌘K → Open runbox**.
 
 ## Disclosures
 
-- **Network:** pulls the container image once; installs a pinned checker toolchain
-  (`ruff==0.17.1`, `pytest==9.1.1`) from PyPI once per image; `install` fetches the packages you
-  approve. The container that runs code has no network.
-- Adds a short note (about 80 tokens) to each turn; turn it off with `hint: false`.
-- Reads Hermes' `state.db` read-only, once an hour, to find deleted chats.
+- **Network.** The container that runs code has no network. Network is used only to set the box
+  up and for installs you approve:
+  - the container image, pulled once, pinned by digest (`python:3.12-slim@sha256:a6e34c59…`);
+  - the checker toolchain, installed once per image from PyPI with `pip --require-hashes`
+    (ruff 0.16.9, pytest 9.1.1 and its dependencies; every file hash-pinned in
+    `plugin/runbox/toolchain-requirements.txt`; ruff ships a native binary in its wheel);
+  - on macOS, colima downloads and verifies its own VM image the first time the `runbox` profile
+    starts;
+  - `install` fetches the PyPI packages you approve, in a separate installer container.
+- **Commands.** runbox drives the `docker` CLI (and `colima` on macOS) with its own Docker config.
+  `run`, `check` and `test` execute inside the offline, hardened container without Hermes'
+  dangerous-command approval, the same way Hermes' own Docker terminal backend treats its
+  container. `install` always goes through Hermes' approval prompt.
+- **Background thread.** One thread per Hermes process checks once a minute whether a box is idle
+  (removes idle containers, stops the VM), and once an hour removes boxes of deleted or long-idle
+  chats. It reads Hermes' `state.db` read-only for that.
+- **Reads and writes outside its own data.** `sync` reads the host files or folders the agent
+  passes. `export` writes back only when you ask, only through Hermes' `write_file`; before
+  replacing a file it checks the file is unchanged since the sync (otherwise it reports a
+  conflict) and reads it through Hermes' `read_file`, as Hermes requires before an overwrite.
+  `confirm_export: true` adds an approval prompt to every export.
+- **Guard.** With `guard_imports` (default on), a `write_file` or `patch` on a file imported into
+  the chat's box asks for your approval first.
+- **Per-turn note.** Adds a short note (about 80 tokens) to each turn; `hint: false` turns it off.
 - Deletes only its own folders under `<HERMES_HOME>/plugin-data/runbox/` and its own containers
-  (labelled `io.hermes.runbox`).
-- `export` writes to host folders only through Hermes' `write_file`, and the agent is told to
-  export only when you ask.
-- No credentials, third-party services or telemetry.
+  (labelled `io.hermes.runbox`). No credentials, third-party services or telemetry.
 
 ## Install
 
@@ -143,7 +159,7 @@ runbox's Desktop half under **Capabilities → Plugins**.
 
 ### Requirements
 
-- Hermes `>= 0.22.0`.
+- Hermes `>= 0.22.2`.
 - macOS: `brew install colima docker`. Linux: a running Docker daemon (containers run as your user).
 - The Hermes data folder must be under your home folder (colima shares only that).
 
@@ -153,7 +169,7 @@ runbox's Desktop half under **Capabilities → Plugins**.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `image` | `python:3.12-slim` | Container image |
+| `image` | `python:3.12-slim@sha256:…` | Container image (pin your own by digest) |
 | `idle_minutes` | `15` | Stop a chat's container (and on macOS the VM) after this many idle minutes |
 | `idle_days` | `90` | Remove a chat's workspace after this many idle days |
 | `memory` | `1g` | Memory limit per container |

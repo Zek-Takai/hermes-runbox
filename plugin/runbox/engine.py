@@ -24,8 +24,11 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-DEFAULT_IMAGE = "python:3.12-slim"
-TOOLCHAIN = ("ruff==0.17.1", "pytest==9.1.1")
+# Pinned by digest (an OCI index covering amd64 and arm64), so a moved tag cannot change what runs.
+DEFAULT_IMAGE = "python:3.12-slim@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1"
+# The checker toolchain (ruff + pytest and its dependencies): exact versions, every file hash-pinned.
+TOOLCHAIN_REQUIREMENTS = Path(__file__).with_name("toolchain-requirements.txt")
+TOOLCHAIN_LABEL = "ruff 0.16.9, pytest 9.1.1"
 LABEL = "io.hermes.runbox"
 COLIMA_PROFILE = "runbox"
 COLIMA_CREATE_ARGS = ("--cpu", "2", "--memory", "2", "--disk", "20", "--vm-type", "vz", "--runtime", "docker")
@@ -60,6 +63,11 @@ class ExecResult:
     stderr: str
     duration_ms: int
     timed_out: bool = False
+
+
+def toolchain_spec() -> str:
+    """Fingerprint of the pinned toolchain; a changed requirements file reinstalls it."""
+    return hashlib.sha256(TOOLCHAIN_REQUIREMENTS.read_bytes()).hexdigest()
 
 
 def container_name(session_id: str) -> str:
@@ -188,7 +196,7 @@ class Docker:
     def ensure_toolchain(self, image: str) -> str | None:
         target = self.toolchain_dir(image)
         marker = target / ".runbox-toolchain"
-        spec = " ".join(TOOLCHAIN)
+        spec = toolchain_spec()
         try:
             if marker.read_text(encoding="utf-8").strip() == spec:
                 return None
@@ -197,14 +205,16 @@ class Docker:
         if target.exists():
             shutil.rmtree(target)
         target.mkdir(parents=True)
-        result = self.pip_install(image, target, list(TOOLCHAIN))
+        shutil.copyfile(TOOLCHAIN_REQUIREMENTS, target / ".runbox-requirements.txt")
+        result = self.pip_install(image, target, ["--require-hashes", "--no-deps", "--only-binary", ":all:",
+                                                  "-r", "/target/.runbox-requirements.txt"])
         landed = (target / "bin" / "ruff").exists() and (target / "pytest").is_dir()
         if result.exit_code != 0 or not landed:
             shutil.rmtree(target, ignore_errors=True)
             why = (result.stderr or result.stdout) if result.exit_code != 0 else "the files did not reach the host folder"
             raise RunboxError("could not install the checker toolchain: " + _tail(why, 800))
         marker.write_text(spec + "\n", encoding="utf-8")
-        return "installed the checker toolchain (" + ", ".join(TOOLCHAIN) + ")"
+        return f"installed the checker toolchain ({TOOLCHAIN_LABEL}, hash-checked)"
 
     # --- containers ------------------------------------------------------------------------
 

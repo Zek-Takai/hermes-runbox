@@ -73,7 +73,7 @@ def rt(tmp_path, monkeypatch):
     runtime.docker = FakeDocker(runtime.root)
     toolchain = runtime.docker.toolchain_dir(runtime.settings.image)
     toolchain.mkdir(parents=True)
-    (toolchain / ".runbox-toolchain").write_text(" ".join(engine.TOOLCHAIN))
+    (toolchain / ".runbox-toolchain").write_text(engine.toolchain_spec())
     monkeypatch.setattr(tool, "runtime", runtime)
     return runtime
 
@@ -555,3 +555,23 @@ def test_export_and_listing_skip_caches(rt, tmp_path, monkeypatch):
     assert [e["file"] for e in out["exported"]] == ["app.py"]
     assert call(action="status")["files"] == ["app.py"]
     assert engine.CONTAINER_ENV["PYTEST_ADDOPTS"] == "-p no:cacheprovider"
+
+
+def test_toolchain_and_image_are_pinned():
+    assert "@sha256:" in engine.DEFAULT_IMAGE
+    lines = engine.TOOLCHAIN_REQUIREMENTS.read_text().splitlines()
+    reqs = [l.split(" ")[0] for l in lines if l and not l.startswith((" ", "#"))]
+    assert reqs and all("==" in r for r in reqs)
+    for i, line in enumerate(lines):
+        if line and not line.startswith((" ", "#")):
+            assert "--hash=sha256:" in lines[i + 1]
+
+
+def test_toolchain_install_requires_hashes(rt):
+    target = rt.docker.toolchain_dir(rt.settings.image)
+    (target / ".runbox-toolchain").unlink()
+    rt.docker.replies[("run", "--rm")] = (1, "", "hash mismatch")
+    out = call(action="check")
+    assert out["success"] is False and "toolchain" in out["error"]
+    (pip,) = rt.docker.ran("run", "--rm")
+    assert "--require-hashes" in pip and "/target/.runbox-requirements.txt" in pip

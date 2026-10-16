@@ -3,7 +3,7 @@ version: 0.1.0
 manifest_version: 2
 api_version: 1
 license: MIT
-requires_hermes: ">=0.22.0"
+requires_hermes: ">=0.22.2"
 description: Build, run and test Python in an offline per-chat container; check and test results come back as a plain issue list
 provides_tools:
   - runbox
@@ -12,7 +12,7 @@ provides_hooks:
   - pre_llm_call
 tags: [container, python, testing, dev]
 config_schema:
-  image: {type: string, default: "python:3.12-slim", description: "Container image for every chat's box"}
+  image: {type: string, default: "python:3.12-slim@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1", description: "Container image for every chat's box (pin by digest)"}
   idle_minutes: {type: float, default: 15, description: "Stop a chat's container (and, on macOS, the runbox VM) after this many idle minutes"}
   idle_days: {type: float, default: 90, description: "Remove a chat's workspace after this many idle days (matches Hermes' 90-day session auto-prune)"}
   memory: {type: string, default: "1g", description: "Memory limit per container"}
