@@ -116,7 +116,9 @@ def test_linux_runs_as_host_user(tmp_path):
         assert d._user_args()[0] == "--user"
 
 
-def test_export_requires_approval():
+def test_export_approval_only_when_configured(rt):
+    assert tool.pre_tool_call(tool_name="runbox", args={"action": "export"}) is None
+    rt.settings.confirm_export = True
     gate = tool.pre_tool_call(tool_name="runbox", args={"action": "export", "paths": ["a.py"]})
     assert gate["action"] == "approve" and gate["rule_key"] == "runbox:export"
     assert "a.py back to the folders they were synced from" in gate["message"]

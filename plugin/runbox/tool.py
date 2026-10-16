@@ -26,8 +26,8 @@ SCHEMA = {
         "as a plain issue list ('file:line: CODE message'). install adds PyPI packages (asks the "
         "user first: it needs network). export writes changed files back to the folders they were synced "
         "from (or to dest), through write_file, skipping files changed on the host since the sync "
-        "unless overwrite; export only when the user asks for it (it also asks them to approve), and "
-        "do not copy fixes into the user's files any other way. status shows the box; stop frees it (files kept; on macOS "
+        "unless overwrite; export only when the user asks for it, and do not copy fixes into the "
+        "user's files any other way. status shows the box; stop frees it (files kept; on macOS "
         "it also stops the runbox VM when no other chat is using it); reset wipes the workspace "
         "and packages. The container starts on demand and stops when idle."
     ),
@@ -78,6 +78,7 @@ class Settings:
     cpus: float = 2
     docker_host: str = ""
     hint: bool = True
+    confirm_export: bool = False
 
 
 @dataclass
@@ -115,7 +116,7 @@ _BY = contextvars.ContextVar("runbox_by", default="agent")  # who started a run:
 _TASK = contextvars.ContextVar("runbox_task", default="")  # the agent task, for Hermes' file tools
 
 _SETTING_TYPES = {"image": str, "idle_minutes": float, "idle_days": float, "memory": str, "cpus": float,
-                  "docker_host": str, "hint": bool}
+                  "docker_host": str, "hint": bool, "confirm_export": bool}
 
 
 def apply_settings(settings: Settings, get) -> Settings:
@@ -164,8 +165,8 @@ def mark_used(root: Path) -> None:
 # --- hooks -----------------------------------------------------------------------------------
 
 def pre_tool_call(tool_name=None, args=None, **_kw):
-    """Hermes' human-approval gate for the two actions that reach outside the box: ``install``
-    (network) and ``export`` (writes the user's files)."""
+    """Hermes' human-approval gate: always for ``install`` (network); for ``export`` (writes the
+    user's files) only with ``confirm_export``, since the user asking for it is the approval."""
     if tool_name != "runbox" or not isinstance(args, dict):
         return None
     action = args.get("action")
@@ -174,7 +175,7 @@ def pre_tool_call(tool_name=None, args=None, **_kw):
         shown = ", ".join(str(p) for p in packages[:10]) + (" ..." if len(packages) > 10 else "")
         return {"action": "approve", "rule_key": "runbox:install",
                 "message": f"runbox install from PyPI (network on, separate installer container): {shown or '(none)'}"}
-    if action == "export":
+    if action == "export" and runtime.settings.confirm_export:
         files = args.get("paths") or []
         what = ", ".join(str(p) for p in files[:10]) + (" ..." if len(files) > 10 else "") if files else "all changed files"
         where = f"to {args['dest']}" if args.get("dest") else "back to the folders they were synced from"

@@ -40,8 +40,8 @@ A typical exchange:
 2. `check` returns `broken.py:2:7: F821 Undefined name ...`; the agent fixes the line and runs
    `test` again until it passes, then `run`s the program for its output.
 3. For an existing project: `sync paths=[~/Projects/app]` imports it, the agent edits and tests in
-   the box, and when you say so, `export` writes the changed files back to `~/Projects/app`
-   (after your approval). Fixes otherwise stay in the box.
+   the box, and when you say so, `export` writes the changed files back to `~/Projects/app`.
+   Fixes otherwise stay in the box.
 
 > If the agent doesn't pick runbox on its own, ask it to "use runbox"; it then keeps using it for
 > the rest of the chat.
@@ -55,7 +55,7 @@ A typical exchange:
 | `check` | `ruff check` with error rules only (`E4,E7,E9,F`): syntax errors, undefined names, unused imports. No style rules. |
 | `test` | `pytest` (`paths`, extra `args`); failures and errors become issues pointing at the failing line. |
 | `install` | `pip install` PyPI `packages`. **Asks for your approval** (it uses the network). |
-| `export` | Write changed files back to the folders they were synced from (new files inside a synced folder too), or everything under `dest`. **Asks for your approval**, and the agent is told to export only when you ask. Files changed on the host since the sync are reported as conflicts and left alone unless `overwrite`. Writes go through Hermes' `write_file`. |
+| `export` | Write changed files back to the folders they were synced from (new files inside a synced folder too), or everything under `dest`. The agent is told to export only when you ask (set `confirm_export` to also get an approval prompt each time). Files changed on the host since the sync are reported as conflicts and left alone unless `overwrite`. Writes go through Hermes' `write_file`. |
 | `status` | Backend, container state, workspace files, installed packages, recent runs. |
 | `stop` | Remove the container (files and packages are kept); on macOS also stops the VM when no other chat is using it. |
 | `reset` | Remove the container, workspace and packages. |
@@ -90,8 +90,9 @@ the title bar's box icon or **⌘K → Open runbox**.
 - **Docker settings:** runbox uses its own Docker client config under its data folder, so your
   `~/.docker` settings and active context are never read or changed. On macOS it runs a dedicated
   colima profile `runbox` (2 CPU, 2 GB), started with `--activate=false`.
-- **Approvals:** `install` (network) and `export` (writes your files) both go through Hermes'
-  approval prompt. The editor's buttons can run, check, test and stop, nothing more.
+- **Approvals:** `install` (network) always goes through Hermes' approval prompt. `export` (writes
+  your files) happens when you ask for it; `confirm_export: true` adds the prompt to it too. The
+  editor's buttons can run, check, test and stop, nothing more.
 
 ## Lifecycle and cleanup
 
@@ -111,7 +112,8 @@ the title bar's box icon or **⌘K → Open runbox**.
 - Reads Hermes' `state.db` read-only, once an hour, to find deleted chats.
 - Deletes only its own folders under `<HERMES_HOME>/plugin-data/runbox/` and its own containers
   (labelled `io.hermes.runbox`).
-- `export` writes to host folders only after your approval, through Hermes' `write_file`.
+- `export` writes to host folders only through Hermes' `write_file`, and the agent is told to
+  export only when you ask.
 - No credentials, third-party services or telemetry.
 
 ## Install
@@ -143,7 +145,8 @@ runbox's Desktop half under **Capabilities → Plugins**.
 | `memory` | `1g` | Memory limit per container |
 | `cpus` | `2` | CPU limit per container |
 | `docker_host` | empty | Docker endpoint; empty = the runbox colima VM on macOS, the default daemon elsewhere |
-| `hint` | `true` | Add the one-line note to each turn |
+| `hint` | `true` | Add the short note to each turn |
+| `confirm_export` | `false` | Also ask for approval before every export |
 
 ## Development
 
