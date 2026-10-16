@@ -360,6 +360,12 @@ function RunboxEditor() {
   const [chooser, setChooser] = useState(null) // { path, remember } for the tab × choice
   const [live, setLive] = useState(null) // an action in flight that this tile did not start
 
+  // A chat picked in the header menu is shown until the user switches chats; then the tile
+  // follows the focused chat again.
+  useEffect(() => {
+    setPicked(null)
+  }, [focusedStored, focused])
+
   const row =
     (rows || []).find((r) => r.dir === picked) || (rows || []).find((r) => r.session_id === focusedStored || r.session_id === focused) || null
   const dir = row?.dir
