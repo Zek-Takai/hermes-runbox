@@ -21,8 +21,9 @@ SCHEMA = {
         "via paths, e.g. scratchpad buffers, or inline files), then: run (a shell command in "
         "/workspace), check (ruff lint + syntax), test (pytest). check/test/run failures come back "
         "as a plain issue list ('file:line: CODE message'). install adds PyPI packages (asks the "
-        "user first: it needs network). status shows the box; stop frees it (files kept); reset "
-        "wipes the workspace and packages. The container starts on demand and stops when idle."
+        "user first: it needs network). status shows the box; stop frees it (files kept; on macOS "
+        "it also stops the runbox VM when no other chat is using it); reset wipes the workspace "
+        "and packages. The container starts on demand and stops when idle."
     ),
     "parameters": {
         "type": "object",
@@ -155,7 +156,7 @@ def handle(args, session_id=None, task_id=None, **_kw) -> str:
             if action == "sync":
                 return _sync(path, args)
             if action == "stop":
-                return _ok({"stopped": runtime.engine().remove(engine.container_name(sid))})
+                return _ok(_stop(sid))
             if action == "reset":
                 runtime.engine().remove(engine.container_name(sid))
                 for sub in ("workspace", "deps"):
@@ -170,6 +171,20 @@ def handle(args, session_id=None, task_id=None, **_kw) -> str:
             return json.dumps(result, ensure_ascii=False)
     except (engine.RunboxError, store.StoreError, OSError) as exc:
         return _err(exc)
+
+
+def _stop(sid: str) -> dict:
+    """Remove this chat's container; on macOS also stop the VM when no other box is left."""
+    docker = runtime.engine()
+    if not docker.reachable():
+        return {"stopped": True, "vm_stopped": False, "note": "the backend was not running"}
+    stopped = docker.remove(engine.container_name(sid))
+    vm_stopped = False
+    if docker.colima and not docker.list_boxes():
+        vm_stopped = docker.stop_vm()
+        if vm_stopped:
+            lifecycle.clear_active(runtime.data_root())
+    return {"stopped": stopped, "vm_stopped": vm_stopped}
 
 
 def _prepare(sid: str, path: Path, *, container: bool) -> list[str]:

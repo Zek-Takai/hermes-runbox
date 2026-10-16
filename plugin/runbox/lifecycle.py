@@ -12,6 +12,10 @@ def mark_active(root) -> None:
     (root / ACTIVE_MARKER).touch()
 
 
+def clear_active(root) -> None:
+    (root / ACTIVE_MARKER).unlink(missing_ok=True)
+
+
 def sweep(rt, *, now: float | None = None) -> dict:
     """One idle pass. Cheap no-op unless runbox started something since the last full stop."""
     root = rt.data_root()

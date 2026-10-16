@@ -255,3 +255,21 @@ def test_pytest_report_handles_empty_and_errors():
            'E   ModuleNotFoundError: No module named \'nope\'</error></testcase></testsuite>')
     summary, found = issues.pytest_report(xml)
     assert summary["errors"] == 1 and found[0]["code"] == "test-error" and found[0]["line"] == 1
+    assert issues.render(found[0]) == "test_x.py:1: test-error test_x.py: ModuleNotFoundError: No module named 'nope'"
+
+
+def test_stop_also_stops_vm_when_last_box(rt):
+    rt.docker.replies[("exec",)] = (0, "", "")
+    call(action="run", command="true")
+    out = call(action="stop")
+    assert out["stopped"] and out["vm_stopped"]
+    assert not (rt.root / lifecycle.ACTIVE_MARKER).exists()
+
+
+def test_stop_keeps_vm_for_other_chats(rt):
+    rt.docker.replies[("exec",)] = (0, "", "")
+    call(action="run", command="true")
+    rt.docker.containers[engine.container_name("local-other")] = "running"
+    out = call(action="stop")
+    assert out["stopped"] and not out["vm_stopped"]
+    assert not [c for c in rt.docker.calls if c[:2] == ["colima", "stop"]]

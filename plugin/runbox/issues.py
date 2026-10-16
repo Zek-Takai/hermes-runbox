@@ -71,6 +71,12 @@ def _failure_location(text: str, fallback_file: str, fallback_line) -> tuple[str
     return fallback_file, fallback_line
 
 
+def _error_line(text: str) -> str:
+    """The last ``E   ...`` line of a pytest traceback (the actual exception)."""
+    lines = [line[1:].strip() for line in (text or "").splitlines() if line.startswith("E ")]
+    return lines[-1] if lines else ""
+
+
 def pytest_report(junit_xml: str) -> tuple[dict, list[dict]]:
     """Parse a pytest junit report (``junit_family=xunit1``) into (summary, issues)."""
     summary = {"tests": 0, "failures": 0, "errors": 0, "skipped": 0, "passed": 0}
@@ -96,12 +102,16 @@ def pytest_report(junit_xml: str) -> tuple[dict, list[dict]]:
                 fallback_line = int(line_attr) + 1 if line_attr and line_attr.isdigit() else None
                 file, line = _failure_location(node.text or "", file_attr, fallback_line)
                 name = case.get("name", "")
-                test_id = f"{file_attr or case.get('classname', '')}::{name}".strip(":")
+                # Collection errors have no class and carry the module name; name the file alone.
+                test_id = f"{file_attr}::{name}" if case.get("classname") else (file_attr or name)
+                detail = _error_line(node.text or "")
+                if kind == "failure":
+                    detail = node.get("message") or detail
                 issues.append({
                     "file": file,
                     "line": line,
                     "code": "test-failed" if kind == "failure" else "test-error",
-                    "message": _short(f"{test_id}: {node.get('message') or (node.text or '').strip()}"),
+                    "message": _short(f"{test_id}: {detail or node.get('message') or (node.text or '').strip()}"),
                     "source": "pytest",
                 })
     summary["passed"] = max(0, summary["tests"] - summary["failures"] - summary["errors"] - summary["skipped"])
