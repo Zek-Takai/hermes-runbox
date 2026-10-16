@@ -394,3 +394,14 @@ def test_export_to_dest_and_without_hermes(rt, tmp_path, monkeypatch):
     assert call(action="export", dest="relative/dir")["success"] is False
     runs = store.recent_runs(store.find_session(rt.root, SID))
     assert runs[-1]["action"] == "export"
+
+
+def test_run_syntax_error_without_traceback_header():
+    stderr = (
+        '  File "/workspace/val_syntax_probe.py", line 2\n'
+        "    for i in range(3)\n"
+        "                     ^\n"
+        "SyntaxError: expected ':'\n"
+    )
+    assert issues.render(issues.traceback_issue(stderr)) == "val_syntax_probe.py:2: SyntaxError expected ':'"
+    assert issues.traceback_issue("plain failure text\n") is None

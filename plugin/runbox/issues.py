@@ -121,15 +121,15 @@ def pytest_report(junit_xml: str) -> tuple[dict, list[dict]]:
 def traceback_issue(stderr: str) -> dict | None:
     """The failing workspace frame and the exception line of a Python traceback, if any."""
     lines = (stderr or "").splitlines()
-    if not any(line.startswith("Traceback (most recent call last)") for line in lines):
-        return None
+    # A compile-time SyntaxError prints File/line and the error with no "Traceback" header.
+    has_traceback = any(line.startswith("Traceback (most recent call last)") for line in lines)
     frame = None
     for line in lines:
         match = _TB_FRAME.match(line)
         if match and (match.group(1).startswith(WORKSPACE) or not match.group(1).startswith("/")):
             frame = (_rel(match.group(1)), int(match.group(2)))
     error = next((line.strip() for line in reversed(lines) if _TB_ERROR.match(line.strip())), None)
-    if frame is None and error is None:
+    if frame is None and error is None or (not has_traceback and (frame is None or error is None)):
         return None
     code, _, message = (error or "").partition(":")
     return {
