@@ -544,3 +544,14 @@ def test_container_that_never_sees_mounts_gives_a_clear_error(rt, monkeypatch):
     rt.docker.mounts_visible = lambda name, image: False
     out = call(action="run", command="true")
     assert out["success"] is False and "cannot see its workspace" in out["error"]
+
+
+def test_export_and_listing_skip_caches(rt, tmp_path, monkeypatch):
+    call(action="sync", files={"app.py": "x = 1\n", ".pytest_cache/v/cache/nodeids": "[]",
+                               "__pycache__/app.cpython-312.pyc": "junk"})
+    ctx = WriteCtx()
+    monkeypatch.setattr(tool, "_ctx", ctx)
+    out = call(action="export", dest=str(tmp_path / "out"))
+    assert [e["file"] for e in out["exported"]] == ["app.py"]
+    assert call(action="status")["files"] == ["app.py"]
+    assert engine.CONTAINER_ENV["PYTEST_ADDOPTS"] == "-p no:cacheprovider"

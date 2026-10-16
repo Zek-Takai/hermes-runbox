@@ -742,7 +742,25 @@ function RunboxEditor() {
           })
 
   // ----- bottom panel
-  const lastRun = runs.find((r) => r.action === 'run' || r.action === 'test')
+  // OUTPUT is the program: the latest run. Test and check results live in PROBLEMS.
+  const lastRun = runs.find((r) => r.action === 'run')
+  const lastTest = runs.find((r) => r.action === 'test')
+  const lastCheck = runs.find((r) => r.action === 'check')
+  const testSummary = lastTest
+    ? (() => {
+        const m = /(\d+) passed/.exec(lastTest.output || '')
+        const f = (lastTest.issues || []).length
+        return lastTest.ok ? `Tests: ${m ? m[1] : 'all'} passed` : `Tests: ${f} failing`
+      })()
+    : null
+  const checkSummary = lastCheck ? (lastCheck.ok ? 'Check: no issues' : `Check: ${(lastCheck.issues || []).length} issue(s)`) : null
+  const summaryLine =
+    testSummary || checkSummary
+      ? jsx('div', {
+          className: 'border-b border-(--ui-stroke-secondary) px-3 py-1 text-xs text-(--ui-text-secondary)',
+          children: [testSummary, checkSummary].filter(Boolean).join(' · ')
+        })
+      : null
   const sendButton =
     tab === 'problems' && freshProblems.length
       ? jsx(Button, { size: 'micro', variant: 'ghost', onClick: () => void sendToChat(row, `runbox problems:\n\`\`\`\n${freshProblems.map(renderIssue).join('\n')}\n\`\`\``), children: 'Send to chat' })
@@ -756,7 +774,7 @@ function RunboxEditor() {
 
   const panelBody =
     tab === 'problems'
-      ? problems.length
+      ? [summaryLine, ...(problems.length
         ? problems.map((p, i) =>
             jsxs(
               'button',
@@ -777,7 +795,7 @@ function RunboxEditor() {
               i
             )
           )
-        : jsx('div', { className: 'p-3 text-xs text-(--ui-text-tertiary)', children: runs.some((r) => r.action === 'check' || r.action === 'test') ? 'No problems found.' : 'Run Check or Test to look for problems.' })
+        : [jsx('div', { className: 'p-3 text-xs text-(--ui-text-tertiary)', children: runs.some((r) => r.action === 'check' || r.action === 'test') ? 'No problems found.' : 'Run Check or Test to look for problems.' }, 'none')])]
       : tab === 'output'
         ? lastRun
           ? jsxs('div', {
@@ -791,7 +809,7 @@ function RunboxEditor() {
                 })
               ]
             })
-          : jsx('div', { className: 'p-3 text-xs text-(--ui-text-tertiary)', children: 'Press ▶ Run to see output here.' })
+          : jsx('div', { className: 'p-3 text-xs text-(--ui-text-tertiary)', children: 'Press ▶ Run to see the program output here.' })
         : jsx(RunList, { runs, row })
 
   const panel = jsxs('div', {

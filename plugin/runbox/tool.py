@@ -535,9 +535,12 @@ def _maybe_json(raw):
 
 
 def _listing(workspace: Path, limit: int = 200) -> list[str]:
+    """Workspace files, without caches and VCS folders (SKIP_NAMES); export uses it too."""
     out = []
     for p in sorted(workspace.rglob("*")):
-        if p.is_file():
+        if any(part in SKIP_NAMES for part in p.relative_to(workspace).parts):
+            continue
+        if p.is_file() and not p.is_symlink():
             out.append(str(p.relative_to(workspace)))
             if len(out) >= limit:
                 out.append("...")

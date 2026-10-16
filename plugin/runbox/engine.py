@@ -43,6 +43,7 @@ CONTAINER_ENV = {
     "PYTHONPATH": "/opt/runbox/deps:/opt/runbox/tools",
     "PATH": "/opt/runbox/deps/bin:/opt/runbox/tools/bin:/usr/local/bin:/usr/bin:/bin",
     "PYTHONDONTWRITEBYTECODE": "1",
+    "PYTEST_ADDOPTS": "-p no:cacheprovider",  # no .pytest_cache in the workspace, whoever runs pytest
     "PIP_DISABLE_PIP_VERSION_CHECK": "1",
 }
 _EXTRA_BIN = ("/opt/homebrew/bin", "/usr/local/bin")
