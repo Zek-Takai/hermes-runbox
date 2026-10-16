@@ -4,6 +4,7 @@ from __future__ import annotations
 import contextvars
 import json
 import os
+import re
 import shutil
 import sys
 import threading
@@ -110,6 +111,7 @@ def bind(ctx) -> None:
     global _ctx
     _ctx = ctx
 _BY = contextvars.ContextVar("runbox_by", default="agent")  # who started a run: agent or desktop
+_TASK = contextvars.ContextVar("runbox_task", default="")  # the agent task, for Hermes' file tools
 
 _SETTING_TYPES = {"image": str, "idle_minutes": float, "idle_days": float, "memory": str, "cpus": float,
                   "docker_host": str, "hint": bool}
@@ -174,9 +176,11 @@ def pre_tool_call(tool_name=None, args=None, **_kw):
 
 def handle(args, session_id=None, task_id=None, source="agent", **_kw) -> str:
     token = _BY.set("desktop" if source == "desktop" else "agent")
+    task = _TASK.set(str(task_id or ""))
     try:
         return _handle(args or {}, session_id, task_id)
     finally:
+        _TASK.reset(task)
         _BY.reset(token)
 
 
@@ -311,8 +315,13 @@ def _sync(path: Path, args) -> str:
     workspace = path / "workspace"
     sources = store.read_sources(path)
     if args.get("clean"):
-        shutil.rmtree(workspace, ignore_errors=True)
-        workspace.mkdir()
+        # Empty the folder, never replace it: a running container's bind mount keeps pointing
+        # at the original directory.
+        for child in workspace.iterdir():
+            if child.is_dir() and not child.is_symlink():
+                shutil.rmtree(child, ignore_errors=True)
+            else:
+                child.unlink(missing_ok=True)
         sources = {"origins": {}, "roots": []}
     budget = {"files": 0, "bytes": 0}
     copied = []
@@ -407,8 +416,16 @@ def _export(path: Path, args) -> dict:
     exported, failed = [], []
     if plan and _ctx is None:
         raise engine.RunboxError("export writes through Hermes' write_file; it is only available to the agent")
+    task = {"task_id": _TASK.get()} if _TASK.get() else {}
     for rel, target, text, sha in plan:
-        reply = _maybe_json(_ctx.dispatch_tool("write_file", {"path": str(target), "content": text}))
+        if target.exists():
+            # write_file only replaces a file this task has read in full. runbox has just checked
+            # the file is unchanged since the sync (or overwrite was asked), so read it for real.
+            problem = _read_in_full(target, task)
+            if problem:
+                failed.append(f"{rel}: {problem}")
+                continue
+        reply = _maybe_json(_ctx.dispatch_tool("write_file", {"path": str(target), "content": text}, **task))
         error = reply.get("error") if isinstance(reply, dict) else None
         if error or (isinstance(reply, dict) and reply.get("success") is False):
             failed.append(f"{rel}: {error or reply}")
@@ -424,6 +441,22 @@ def _export(path: Path, args) -> dict:
     _record(path, "export", {**result, "output": "\n".join(lines) or "nothing to export"},
             command=str(dest_root or "back to synced folders"))
     return result
+
+
+def _read_in_full(target: Path, task: dict) -> str | None:
+    """Read ``target`` page by page through Hermes' read_file; returns an error or ``None``."""
+    offset = 1
+    for _ in range(10000):
+        reply = _maybe_json(_ctx.dispatch_tool("read_file", {"path": str(target), "offset": offset}, **task))
+        if not isinstance(reply, dict) or reply.get("error"):
+            return f"could not read {target} before writing: {reply.get('error') if isinstance(reply, dict) else reply}"
+        if not reply.get("truncated"):
+            return None
+        nxt = reply.get("next_offset")
+        if not isinstance(nxt, int) or nxt <= offset:
+            return f"could not page through {target}"
+        offset = nxt
+    return f"{target} is too long to read in full"
 
 
 def _maybe_json(raw):
@@ -494,6 +527,15 @@ def _test(sid: str, path: Path, args) -> dict:
     res = runtime.engine().exec(engine.container_name(sid), ["sh", "-c", script, "runbox-test", *argv],
                                 timeout=_timeout(args))
     out, _, junit = res.stdout.partition(_JUNIT_MARK)
+    notes = []
+    if res.exit_code == 5 and not targets:
+        # pytest only discovers test_*.py; fall back to any file that defines test functions.
+        found_files = _files_with_tests(path / "workspace")
+        if found_files:
+            notes.append("no test_*.py files; ran the tests defined in: " + ", ".join(found_files))
+            res = runtime.engine().exec(engine.container_name(sid), ["sh", "-c", script, "runbox-test", *argv, *found_files],
+                                        timeout=_timeout(args))
+            out, _, junit = res.stdout.partition(_JUNIT_MARK)
     summary, found = issues.pytest_report(junit)
     if res.exit_code == 5:
         summary["note"] = "no tests were collected"
@@ -505,9 +547,30 @@ def _test(sid: str, path: Path, args) -> dict:
         "output": _clip(out.strip() + ("\n" + res.stderr.strip() if res.stderr.strip() else ""), 6000),
     }
     if res.timed_out:
-        result["notes"] = [f"timed out after {_timeout(args)}s; the container was restarted"]
+        notes.append(f"timed out after {_timeout(args)}s; the container was restarted")
+    if notes:
+        result["notes"] = notes
     _record(path, "test", result, command="pytest " + " ".join(extra + targets))
     return result
+
+
+_TEST_DEF = re.compile(r"^(?:async\s+)?def test_\w*\s*\(|^class Test\w*", re.MULTILINE)
+
+
+def _files_with_tests(workspace: Path, limit: int = 50) -> list[str]:
+    out = []
+    for p in sorted(workspace.rglob("*.py")):
+        rel = p.relative_to(workspace)
+        if any(part in SKIP_NAMES for part in rel.parts) or p.is_symlink():
+            continue
+        try:
+            if _TEST_DEF.search(p.read_text(encoding="utf-8", errors="replace")):
+                out.append(rel.as_posix())
+        except OSError:
+            continue
+        if len(out) >= limit:
+            break
+    return out
 
 
 def _install(sid: str, path: Path, args) -> dict:

@@ -76,7 +76,7 @@ def rt(tmp_path, monkeypatch):
 
 
 def call(**args):
-    return json.loads(tool.handle(args, session_id=SID))
+    return json.loads(tool.handle(args, session_id=SID, task_id="task-1"))
 
 
 def test_container_is_offline_and_hardened(rt):
@@ -347,14 +347,25 @@ def test_agent_actions_are_announced(rt, monkeypatch):
 
 
 class WriteCtx:
+    """Stands in for Hermes: write_file refuses an existing file the task has not read in full."""
+
     def __init__(self):
         self.writes = []
+        self.read = set()
+        self.tasks = set()
 
-    def dispatch_tool(self, name, args):
+    def dispatch_tool(self, name, args, task_id=None):
+        self.tasks.add(task_id)
+        path = Path(args["path"])
+        if name == "read_file":
+            self.read.add((task_id, str(path)))
+            return json.dumps({"content": path.read_text(), "truncated": False})
         assert name == "write_file"
+        if path.exists() and (task_id, str(path)) not in self.read:
+            return json.dumps({"success": False, "error": "has not seen its full current content"})
         self.writes.append(args["path"])
-        Path(args["path"]).parent.mkdir(parents=True, exist_ok=True)
-        Path(args["path"]).write_text(args["content"])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(args["content"])
         return json.dumps({"success": True})
 
 
@@ -405,3 +416,41 @@ def test_run_syntax_error_without_traceback_header():
     )
     assert issues.render(issues.traceback_issue(stderr)) == "val_syntax_probe.py:2: SyntaxError expected ':'"
     assert issues.traceback_issue("plain failure text\n") is None
+
+
+def test_export_reads_existing_targets_as_the_agent_task(rt, tmp_path, monkeypatch):
+    proj = tmp_path / "p"
+    proj.mkdir()
+    (proj / "a.py").write_text("x = 1\n")
+    call(action="sync", paths=[str(proj)])
+    (store.find_session(rt.root, SID) / "workspace" / "a.py").write_text("x = 2\n")
+    ctx = WriteCtx()
+    monkeypatch.setattr(tool, "_ctx", ctx)
+    out = call(action="export")
+    assert out["ok"] and (proj / "a.py").read_text() == "x = 2\n"
+    assert ctx.tasks == {"task-1"}
+
+
+def test_clean_sync_keeps_the_mounted_folder(rt):
+    call(action="sync", files={"a.py": "1"})
+    ws = store.find_session(rt.root, SID) / "workspace"
+    inode = ws.stat().st_ino
+    (ws / "sub").mkdir()
+    (ws / "sub" / "b.py").write_text("2")
+    assert call(action="sync", clean=True, files={"c.py": "3"})["files"] == ["c.py"]
+    assert ws.stat().st_ino == inode
+
+
+def test_test_falls_back_to_files_that_define_tests(rt):
+    call(action="sync", files={"report.py": "def test_x():\n    assert True\n", "util.py": "x = 1\n"})
+    replies = iter([(5, "===RUNBOX-JUNIT===\n", ""), (0, "===RUNBOX-JUNIT===\n" + JUNIT.replace('failures="1"', 'failures="0"'), "")])
+
+    def exec_(name, argv, *, timeout):
+        rc, out, err = next(replies)
+        exec_.argvs.append(argv)
+        return engine.ExecResult(rc, out, err, 5)
+    exec_.argvs = []
+    rt.docker.exec = exec_
+    out = call(action="test")
+    assert "report.py" in exec_.argvs[1] and "util.py" not in exec_.argvs[1]
+    assert any("ran the tests defined in: report.py" in n for n in out["notes"])
