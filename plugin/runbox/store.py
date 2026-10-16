@@ -245,7 +245,8 @@ def workspace_files(entry: Path, *, limit: int = 500) -> dict:
                 continue
             count += 1
             if len(out) < limit:
-                out.append({"path": rel.as_posix(), "bytes": p.stat().st_size})
+                st = p.stat()
+                out.append({"path": rel.as_posix(), "bytes": st.st_size, "mtime": st.st_mtime})
     return {"count": count, "files": out, "truncated": count > len(out)}
 
 

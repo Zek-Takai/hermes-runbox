@@ -77,9 +77,21 @@ def sessions():
             "backend_running": running}
 
 
+def _display(host: str) -> str:
+    home = str(Path.home())
+    return "~" + host[len(home):] if host == home or host.startswith(home + "/") else host
+
+
 @router.get("/sessions/{dir_name}/files")
 def files(dir_name: str):
-    return store.workspace_files(_entry(dir_name))
+    entry = _entry(dir_name)
+    listing = store.workspace_files(entry)
+    origins = store.read_sources(entry)["origins"]
+    for f in listing["files"]:
+        origin = origins.get(f["path"])
+        if origin and origin.get("host"):
+            f["origin"] = _display(origin["host"])
+    return listing
 
 
 @router.get("/sessions/{dir_name}/file")

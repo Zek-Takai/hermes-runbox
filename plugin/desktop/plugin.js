@@ -64,8 +64,10 @@ async function loadTitles() {
   return titles
 }
 
-// Problems = the latest check, the latest test and the latest failing run, de-duplicated.
-function problemsOf(runs) {
+// Problems = the latest check, the latest test and the latest failing run, de-duplicated. An issue
+// is stale when its file changed after the run that reported it (e.g. fixed by a later edit).
+const STALE_SLACK_S = 2 // VM and host clocks can differ slightly
+function problemsOf(runs, meta) {
   const seen = new Set()
   const out = []
   for (const action of ['check', 'test', 'run']) {
@@ -74,7 +76,8 @@ function problemsOf(runs) {
       const key = renderIssue(issue)
       if (!seen.has(key)) {
         seen.add(key)
-        out.push({ ...issue, from: action })
+        const mtime = meta[issue.file]?.mtime
+        out.push({ ...issue, from: action, stale: mtime != null && mtime > latest.ts + STALE_SLACK_S })
       }
     }
   }
@@ -287,7 +290,7 @@ function PanelTabs({ tab, setTab, problems, children }) {
     )
   return jsxs('div', {
     className: 'flex items-center gap-1 border-b border-(--ui-stroke-secondary) px-2',
-    children: [item('problems', `Problems${problems.length ? ` ${problems.length}` : ''}`), item('output', 'Output'), item('runs', 'Runs'), jsx('span', { className: 'flex-1' }), children]
+    children: [item('problems', `Problems${problems.filter((p) => !p.stale).length ? ` ${problems.filter((p) => !p.stale).length}` : ''}`), item('output', 'Output'), item('runs', 'Runs'), jsx('span', { className: 'flex-1' }), children]
   })
 }
 
@@ -339,6 +342,7 @@ function RunboxEditor() {
   const [titles, setTitles] = useState(new Map())
   const [picked, setPicked] = useState(null)
   const [files, setFiles] = useState([])
+  const [fileMeta, setFileMeta] = useState({}) // path -> { mtime, origin }
   const [openTabs, setOpenTabs] = useState([])
   const [active, setActive] = useState(null)
   const knownFiles = useRef(new Set())
@@ -396,6 +400,7 @@ function RunboxEditor() {
       const [f, r] = await Promise.all([rest(`${sessionPath(dir)}/files`), rest(`${sessionPath(dir)}/runs`)])
       const list = (f.files || []).map((x) => x.path)
       setFiles(list)
+      setFileMeta(Object.fromEntries((f.files || []).map((x) => [x.path, { mtime: x.mtime, origin: x.origin }])))
       setRuns(r.runs || [])
       // Files that newly appear (the agent added them) open as tabs unless the user closed them.
       const fresh = list.filter((p) => !knownFiles.current.has(p) && !closedTabs.current.has(p))
@@ -468,7 +473,8 @@ function RunboxEditor() {
 
   const buf = active ? buffers[active] : null
   const dirty = (path) => buffers[path] && buffers[path].draft !== buffers[path].saved
-  const problems = problemsOf(runs)
+  const problems = problemsOf(runs, fileMeta)
+  const freshProblems = problems.filter((p) => !p.stale)
   const running = row?.container === 'running'
 
   const save = async (path) => {
@@ -706,6 +712,17 @@ function RunboxEditor() {
     ]
   })
 
+  const origin = active ? fileMeta[active]?.origin : null
+  const fileBar = active
+    ? jsxs('div', {
+        className: 'flex items-center gap-2 border-b border-(--ui-stroke-secondary) px-3 py-0.5 text-[0.68rem] text-(--ui-text-quaternary)',
+        children: [
+          jsx('span', { className: 'font-mono text-(--ui-text-tertiary)', children: active }),
+          jsx('span', { className: 'truncate', title: origin ? `Edits here change the box's copy, not ${origin}` : undefined, children: origin ? `runbox copy · imported from ${origin}` : 'runbox copy · created in the box' })
+        ]
+      })
+    : null
+
   const editor = !active
     ? jsx(EmptyState, {
         title: files.length ? 'No file open' : 'No files yet',
@@ -718,7 +735,7 @@ function RunboxEditor() {
         : jsx(CodeEditor, {
             text: buf.draft,
             isPython: active.endsWith('.py'),
-            problems: problems.filter((p) => p.file === active),
+            problems: freshProblems.filter((p) => p.file === active),
             jump,
             onChange: (draft) => setBuffers((b) => ({ ...b, [active]: { ...b[active], draft } })),
             onSave: () => void save(active)
@@ -727,8 +744,8 @@ function RunboxEditor() {
   // ----- bottom panel
   const lastRun = runs.find((r) => r.action === 'run' || r.action === 'test')
   const sendButton =
-    tab === 'problems' && problems.length
-      ? jsx(Button, { size: 'micro', variant: 'ghost', onClick: () => void sendToChat(row, `runbox problems:\n\`\`\`\n${problems.map(renderIssue).join('\n')}\n\`\`\``), children: 'Send to chat' })
+    tab === 'problems' && freshProblems.length
+      ? jsx(Button, { size: 'micro', variant: 'ghost', onClick: () => void sendToChat(row, `runbox problems:\n\`\`\`\n${freshProblems.map(renderIssue).join('\n')}\n\`\`\``), children: 'Send to chat' })
       : tab === 'output' && lastRun
         ? jsx(Button, { size: 'micro', variant: 'ghost', onClick: () => void sendToChat(row, runText(lastRun)), children: 'Send to chat' })
         : null
@@ -746,14 +763,15 @@ function RunboxEditor() {
               {
                 type: 'button',
                 className: 'flex w-full items-baseline gap-2 px-3 py-0.5 text-left font-mono text-xs hover:bg-(--ui-stroke-secondary)',
-                title: p.file && files.includes(p.file) ? 'Go to this line' : undefined,
+                style: p.stale ? { opacity: 0.5 } : undefined,
+                title: p.stale ? 'The file changed after this result; run Check or Test again' : p.file && files.includes(p.file) ? 'Go to this line' : undefined,
                 onClick: () => goTo(p),
                 children: [
-                  jsx('span', { style: { color: FAIL_COLOR }, children: '✗' }),
+                  jsx('span', { style: { color: p.stale ? undefined : FAIL_COLOR }, children: p.stale ? '○' : '✗' }),
                   jsx('span', { className: 'text-(--ui-text-secondary)', children: `${p.file || '?'}${p.line ? `:${p.line}` : ''}${p.col ? `:${p.col}` : ''}` }),
                   jsx('span', { className: 'text-(--ui-text-tertiary)', children: p.code }),
                   jsx('span', { className: 'min-w-0 flex-1 text-(--ui-text-primary)', children: p.message }),
-                  jsx('span', { className: 'text-(--ui-text-quaternary)', children: p.from })
+                  jsx('span', { className: 'text-(--ui-text-quaternary)', children: p.stale ? `${p.from} · file changed since — re-run` : p.from })
                 ]
               },
               i
@@ -820,7 +838,7 @@ function RunboxEditor() {
 
   return jsxs('div', {
     className: 'relative flex h-full flex-col overflow-hidden',
-    children: [header, tabsRow, toolbar, jsx('div', { className: 'flex min-h-0 flex-1 flex-col', children: editor }), panel, dialog]
+    children: [header, tabsRow, toolbar, fileBar, jsx('div', { className: 'flex min-h-0 flex-1 flex-col', children: editor }), panel, dialog]
   })
 }
 

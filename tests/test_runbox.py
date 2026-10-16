@@ -330,7 +330,7 @@ def test_backend_files_runs_and_actions(rt, monkeypatch):
     rows = client.get("/sessions").json()["sessions"]
     assert [(r["session_id"], r["files"]) for r in rows] == [(SID, 1)]
     d = rows[0]["dir"]
-    assert client.get(f"/sessions/{d}/files").json()["files"] == [{"path": "main.py", "bytes": 9}]
+    assert [(f["path"], f["bytes"]) for f in client.get(f"/sessions/{d}/files").json()["files"]] == [("main.py", 9)]
     assert client.put(f"/sessions/{d}/file", params={"path": "main.py"}, json={"content": "print(2)\n"}).status_code == 200
     assert client.get(f"/sessions/{d}/file", params={"path": "main.py"}).json()["content"] == "print(2)\n"
     assert client.get(f"/sessions/{d}/file", params={"path": "../x"}).status_code == 404
@@ -487,3 +487,39 @@ def test_dev_loop_skill_is_well_formed():
     assert "name: dev-loop" in head
     desc = next(line.split(":", 1)[1].strip() for line in head.splitlines() if line.startswith("description:"))
     assert len(desc) <= 60
+
+
+def test_direct_edit_of_an_imported_original_asks_first(rt, tmp_path):
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / "main.py").write_text("print(1)\n")
+    (tmp_path / "other.py").write_text("x = 1\n")
+    call(action="sync", paths=[str(proj)])
+    hook = lambda name, **args: tool.pre_tool_call(tool_name=name, args=args, session_id=SID)  # noqa: E731
+    gate = hook("patch", path=str(proj / "main.py"), old_string="1", new_string="2")
+    assert gate["action"] == "approve" and gate["rule_key"] == "runbox:direct-edit"
+    assert hook("write_file", path=str(proj / "main.py"), content="x")["action"] == "approve"
+    v4a = f"*** Begin Patch\n*** Update File: {proj / 'main.py'}\n@@\n-print(1)\n+print(2)\n*** End Patch"
+    assert hook("patch", mode="patch", patch=v4a)["action"] == "approve"
+    assert hook("write_file", path=str(tmp_path / "other.py"), content="x") is None
+    assert tool.pre_tool_call(tool_name="write_file", args={"path": str(proj / "main.py")},
+                              session_id="local-other") is None
+    token = tool._EXPORTING.set(True)
+    try:
+        assert hook("write_file", path=str(proj / "main.py"), content="x") is None
+    finally:
+        tool._EXPORTING.reset(token)
+    rt.settings.guard_imports = False
+    assert hook("write_file", path=str(proj / "main.py"), content="x") is None
+
+
+def test_backend_files_carry_origin_and_mtime(rt, monkeypatch, tmp_path):
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / "main.py").write_text("print(1)\n")
+    call(action="sync", paths=[str(proj)], files={"new.py": "x = 1\n"})
+    client, _ = _backend(rt, monkeypatch)
+    d = client.get("/sessions").json()["sessions"][0]["dir"]
+    listed = {f["path"]: f for f in client.get(f"/sessions/{d}/files").json()["files"]}
+    assert listed["main.py"]["origin"].endswith("proj/main.py") and "origin" not in listed["new.py"]
+    assert listed["main.py"]["mtime"] > 0

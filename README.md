@@ -78,7 +78,9 @@ the title bar's box icon or **⌘K → Open runbox**.
   *Close tab* or *Delete file*, and can remember the choice.
 - **Toolbar:** a command (defaults to `python <open file>`), **▶ Run**, **Check**, **Test**,
   **■ Stop**. Unsaved files are saved first.
-- **Problem markers** on the lines that have issues.
+- **Problem markers** on the lines that have issues. Results from before a file last changed are
+  shown as outdated until the next check or test.
+- The file bar says which copy you are looking at: the box's copy, and where it was imported from.
 - **Bottom panel:** **PROBLEMS** (click to jump to the line), **OUTPUT** (command, output, exit
   code) and **RUNS** (history, yours and the agent's). Each can **Send to chat**, which puts the
   result in the chat's message box for you to send.
@@ -100,6 +102,9 @@ the title bar's box icon or **⌘K → Open runbox**.
 - **Approvals:** `install` (network) always goes through Hermes' approval prompt. `export` (writes
   your files) happens when you ask for it; `confirm_export: true` adds the prompt to it too. The
   editor's buttons can run, check, test and stop, nothing more.
+- **Import guard:** if the agent edits a file it imported into the box directly (Hermes' own
+  `write_file` or `patch` on the original), Hermes asks you first. Fixes are meant to stay in the
+  box until you ask for them; `export` itself passes. Turn off with `guard_imports: false`.
 
 ## Lifecycle and cleanup
 
@@ -154,6 +159,7 @@ runbox's Desktop half under **Capabilities → Plugins**.
 | `docker_host` | empty | Docker endpoint; empty = the runbox colima VM on macOS, the default daemon elsewhere |
 | `hint` | `true` | Add the short note to each turn |
 | `confirm_export` | `false` | Also ask for approval before every export |
+| `guard_imports` | `true` | Ask before the agent edits an imported original directly |
 
 ## Development
 

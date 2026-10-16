@@ -79,6 +79,7 @@ class Settings:
     docker_host: str = ""
     hint: bool = True
     confirm_export: bool = False
+    guard_imports: bool = True
 
 
 @dataclass
@@ -114,9 +115,11 @@ def bind(ctx) -> None:
     _ctx = ctx
 _BY = contextvars.ContextVar("runbox_by", default="agent")  # who started a run: agent or desktop
 _TASK = contextvars.ContextVar("runbox_task", default="")  # the agent task, for Hermes' file tools
+_EXPORTING = contextvars.ContextVar("runbox_exporting", default=False)  # export's own writes pass the guard
 
 _SETTING_TYPES = {"image": str, "idle_minutes": float, "idle_days": float, "memory": str, "cpus": float,
-                  "docker_host": str, "hint": bool, "confirm_export": bool}
+                  "docker_host": str, "hint": bool, "confirm_export": bool,
+                  "guard_imports": bool}
 
 
 def apply_settings(settings: Settings, get) -> Settings:
@@ -164,10 +167,16 @@ def mark_used(root: Path) -> None:
 
 # --- hooks -----------------------------------------------------------------------------------
 
-def pre_tool_call(tool_name=None, args=None, **_kw):
+def pre_tool_call(tool_name=None, args=None, session_id=None, task_id=None, **_kw):
     """Hermes' human-approval gate: always for ``install`` (network); for ``export`` (writes the
-    user's files) only with ``confirm_export``, since the user asking for it is the approval."""
-    if tool_name != "runbox" or not isinstance(args, dict):
+    user's files) only with ``confirm_export``, since the user asking for it is the approval; and,
+    with ``guard_imports``, for a direct write_file/patch on a file imported into this chat's box
+    (fixes are meant to stay in the box until the user asks for them)."""
+    if not isinstance(args, dict):
+        return None
+    if tool_name in ("write_file", "patch"):
+        return _guard_direct_edit(tool_name, args, str(session_id or task_id or ""))
+    if tool_name != "runbox":
         return None
     action = args.get("action")
     if action == "install":
@@ -195,6 +204,41 @@ def handle(args, session_id=None, task_id=None, source="agent", **_kw) -> str:
     finally:
         _TASK.reset(task)
         _BY.reset(token)
+
+
+_V4A_FILE = re.compile(r"^\*\*\* (?:Update|Add|Delete) File: (.+)$")
+
+
+def _edited_paths(tool_name: str, args: dict) -> list[str]:
+    paths = [args["path"]] if isinstance(args.get("path"), str) and args.get("path") else []
+    if tool_name == "patch":
+        for line in str(args.get("patch") or "").splitlines():
+            match = _V4A_FILE.match(line.strip())
+            if match:
+                paths.append(match.group(1).strip())
+    return paths
+
+
+def _real(path: str) -> str:
+    return os.path.realpath(os.path.expanduser(path))
+
+
+def _guard_direct_edit(tool_name: str, args: dict, sid: str):
+    if not runtime.settings.guard_imports or _EXPORTING.get() or not sid:
+        return None
+    try:
+        entry = store.find_session(runtime.data_root(), sid)
+        if entry is None:
+            return None
+        imported = {_real(o["host"]) for o in store.read_sources(entry)["origins"].values() if o.get("host")}
+        hits = [p for p in _edited_paths(tool_name, args) if _real(p) in imported]
+    except Exception:
+        return None  # the guard must never break Hermes' own file tools
+    if not hits:
+        return None
+    return {"action": "approve", "rule_key": "runbox:direct-edit",
+            "message": (f"{', '.join(hits[:3])} was imported into runbox; fixes stay in the box until "
+                        "you ask for them (runbox export). Allow this direct edit of the original?")}
 
 
 def broadcast(event: str, payload: dict) -> None:
@@ -430,6 +474,22 @@ def _export(path: Path, args) -> dict:
     if plan and _ctx is None:
         raise engine.RunboxError("export writes through Hermes' write_file; it is only available to the agent")
     task = {"task_id": _TASK.get()} if _TASK.get() else {}
+    exporting = _EXPORTING.set(True)
+    try:
+        _write_plan(plan, task, dest_root, origins, exported, failed)
+    finally:
+        _EXPORTING.reset(exporting)
+    if exported and dest_root is None:
+        store.write_sources(path, {"origins": origins, "roots": roots})
+    result = {"exported": exported, "unchanged": len(unchanged), "conflicts": conflicts,
+              "skipped": skipped, "failed": failed, "ok": not conflicts and not failed}
+    lines = [f"{e['file']} -> {e['to']}" for e in exported] + conflicts + skipped + failed
+    _record(path, "export", {**result, "output": "\n".join(lines) or "nothing to export"},
+            command=str(dest_root or "back to synced folders"))
+    return result
+
+
+def _write_plan(plan, task, dest_root, origins, exported, failed) -> None:
     for rel, target, text, sha in plan:
         if target.exists():
             # write_file only replaces a file this task has read in full. runbox has just checked
@@ -446,14 +506,6 @@ def _export(path: Path, args) -> dict:
         exported.append({"file": rel, "to": str(target)})
         if dest_root is None:
             origins[rel] = {"host": str(target), "sha": sha}
-    if exported and dest_root is None:
-        store.write_sources(path, {"origins": origins, "roots": roots})
-    result = {"exported": exported, "unchanged": len(unchanged), "conflicts": conflicts,
-              "skipped": skipped, "failed": failed, "ok": not conflicts and not failed}
-    lines = [f"{e['file']} -> {e['to']}" for e in exported] + conflicts + skipped + failed
-    _record(path, "export", {**result, "output": "\n".join(lines) or "nothing to export"},
-            command=str(dest_root or "back to synced folders"))
-    return result
 
 
 def _read_in_full(target: Path, task: dict) -> str | None:
