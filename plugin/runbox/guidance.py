@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 RULE = ("[runbox] To run, check (lint/syntax) or test Python code, use the `runbox` tool: an offline "
-        "container for this chat; failures come back as file:line issues. If it is not directly "
-        "callable, load it with tool_describe(names=[\"runbox\"]).")
+        "container for this chat; failures come back as file:line issues. Fixes stay in the box: "
+        "write them back to the user's files (action=export) only when the user asks. If it is not "
+        "directly callable, load it with tool_describe(names=[\"runbox\"]).")
 
 
 def reminder(enabled: bool, **_kw):

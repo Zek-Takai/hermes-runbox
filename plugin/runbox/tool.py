@@ -26,7 +26,8 @@ SCHEMA = {
         "as a plain issue list ('file:line: CODE message'). install adds PyPI packages (asks the "
         "user first: it needs network). export writes changed files back to the folders they were synced "
         "from (or to dest), through write_file, skipping files changed on the host since the sync "
-        "unless overwrite. status shows the box; stop frees it (files kept; on macOS "
+        "unless overwrite; export only when the user asks for it (it also asks them to approve), and "
+        "do not copy fixes into the user's files any other way. status shows the box; stop frees it (files kept; on macOS "
         "it also stops the runbox VM when no other chat is using it); reset wipes the workspace "
         "and packages. The container starts on demand and stops when idle."
     ),
@@ -163,13 +164,24 @@ def mark_used(root: Path) -> None:
 # --- hooks -----------------------------------------------------------------------------------
 
 def pre_tool_call(tool_name=None, args=None, **_kw):
-    """``install`` reaches the network, so it goes through Hermes' human-approval gate."""
-    if tool_name != "runbox" or not isinstance(args, dict) or args.get("action") != "install":
+    """Hermes' human-approval gate for the two actions that reach outside the box: ``install``
+    (network) and ``export`` (writes the user's files)."""
+    if tool_name != "runbox" or not isinstance(args, dict):
         return None
-    packages = args.get("packages") or []
-    shown = ", ".join(str(p) for p in packages[:10]) + (" ..." if len(packages) > 10 else "")
-    return {"action": "approve", "rule_key": "runbox:install",
-            "message": f"runbox install from PyPI (network on, separate installer container): {shown or '(none)'}"}
+    action = args.get("action")
+    if action == "install":
+        packages = args.get("packages") or []
+        shown = ", ".join(str(p) for p in packages[:10]) + (" ..." if len(packages) > 10 else "")
+        return {"action": "approve", "rule_key": "runbox:install",
+                "message": f"runbox install from PyPI (network on, separate installer container): {shown or '(none)'}"}
+    if action == "export":
+        files = args.get("paths") or []
+        what = ", ".join(str(p) for p in files[:10]) + (" ..." if len(files) > 10 else "") if files else "all changed files"
+        where = f"to {args['dest']}" if args.get("dest") else "back to the folders they were synced from"
+        extra = " (overwriting host changes)" if args.get("overwrite") else ""
+        return {"action": "approve", "rule_key": "runbox:export",
+                "message": f"runbox export {what} {where}{extra}"}
+    return None
 
 
 # --- handler ---------------------------------------------------------------------------------

@@ -116,6 +116,14 @@ def test_linux_runs_as_host_user(tmp_path):
         assert d._user_args()[0] == "--user"
 
 
+def test_export_requires_approval():
+    gate = tool.pre_tool_call(tool_name="runbox", args={"action": "export", "paths": ["a.py"]})
+    assert gate["action"] == "approve" and gate["rule_key"] == "runbox:export"
+    assert "a.py back to the folders they were synced from" in gate["message"]
+    dest = tool.pre_tool_call(tool_name="runbox", args={"action": "export", "dest": "/x", "overwrite": True})
+    assert "all changed files to /x (overwriting host changes)" in dest["message"]
+
+
 def test_install_requires_approval_and_no_pip_options(rt):
     assert tool.pre_tool_call(tool_name="runbox", args={"action": "run"}) is None
     assert tool.pre_tool_call(tool_name="terminal", args={"action": "install"}) is None
