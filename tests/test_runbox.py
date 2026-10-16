@@ -273,3 +273,60 @@ def test_stop_keeps_vm_for_other_chats(rt):
     out = call(action="stop")
     assert out["stopped"] and not out["vm_stopped"]
     assert not [c for c in rt.docker.calls if c[:2] == ["colima", "stop"]]
+
+
+def test_workspace_paths_stay_inside(tmp_path):
+    root = tmp_path / "data"
+    entry = store.session_dir(root, SID)
+    store.write_file(entry, "pkg/a.py", "x = 1\n")
+    assert store.read_file(entry, "pkg/a.py")["content"] == "x = 1\n"
+    for bad in ("../escape.py", "/etc/passwd", "pkg/../../x.py", "", "a\\b.py"):
+        with pytest.raises(store.StoreError):
+            store.workspace_path(entry, bad)
+    outside = tmp_path / "secret.txt"
+    outside.write_text("no")
+    (entry / "workspace" / "link.txt").symlink_to(outside)
+    with pytest.raises(store.StoreError):
+        store.read_file(entry, "link.txt")
+    assert [f["path"] for f in store.workspace_files(entry)["files"]] == ["pkg/a.py"]
+
+
+def _backend(rt, monkeypatch):
+    fastapi = pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+    import importlib.util as iu
+    spec = iu.spec_from_file_location("runbox_test_plugin_api",
+                                      Path(__file__).resolve().parents[1] / "plugin" / "dashboard" / "plugin_api.py")
+    api = iu.module_from_spec(spec)
+    spec.loader.exec_module(api)
+    backend_rt = api.tool.Runtime(root=rt.root)
+    backend_rt.docker = rt.docker
+    monkeypatch.setattr(api.tool, "runtime", backend_rt)
+    monkeypatch.setattr(api, "_runtime", lambda: backend_rt)
+    monkeypatch.setattr(api, "_state_db", lambda: rt.root / "missing.db")
+    notified = []
+    monkeypatch.setattr(api, "_notify", notified.append)  # hermes_cli import re-execs outside Hermes
+    app = fastapi.FastAPI()
+    app.include_router(api.router)
+    return TestClient(app), notified
+
+
+def test_backend_files_runs_and_actions(rt, monkeypatch):
+    call(action="sync", files={"main.py": "print(1)\n"})
+    client, notified = _backend(rt, monkeypatch)
+    rows = client.get("/sessions").json()["sessions"]
+    assert [(r["session_id"], r["files"]) for r in rows] == [(SID, 1)]
+    d = rows[0]["dir"]
+    assert client.get(f"/sessions/{d}/files").json()["files"] == [{"path": "main.py", "bytes": 9}]
+    assert client.put(f"/sessions/{d}/file", params={"path": "main.py"}, json={"content": "print(2)\n"}).status_code == 200
+    assert client.get(f"/sessions/{d}/file", params={"path": "main.py"}).json()["content"] == "print(2)\n"
+    assert client.get(f"/sessions/{d}/file", params={"path": "../x"}).status_code == 404
+    rt.docker.replies[("exec",)] = (0, "2\n", "")
+    out = client.post(f"/sessions/{d}/actions/run", json={"command": "python main.py"}).json()
+    assert out["ok"] and out["stdout"] == "2\n"
+    assert client.post(f"/sessions/{d}/actions/install", json={"packages": ["x"]}).status_code == 400
+    runs = client.get(f"/sessions/{d}/runs").json()["runs"]
+    assert runs[0]["command"] == "python main.py" and runs[0]["by"] == "desktop"
+    assert client.delete(f"/sessions/{d}/file", params={"path": "main.py"}).json()["deleted"]
+    assert client.get("/sessions/nope/files").status_code == 404
+    assert notified == [d, d, d]  # save, run, delete each refresh the tab

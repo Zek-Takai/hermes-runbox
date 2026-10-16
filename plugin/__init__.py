@@ -57,28 +57,9 @@ def _loop() -> None:
         time.sleep(SWEEP_POLL_S)
 
 
-def _setting(ctx, key, cast, default):
-    try:
-        value = ctx.get_config(key, default=default)
-        if value is None:
-            return default
-        if cast is bool and isinstance(value, str):
-            return value.strip().lower() in ("1", "true", "yes", "on")
-        return cast(value)
-    except Exception:
-        return default
-
-
 def register(ctx):
     global _threads_started
-    s = tool.runtime.settings
-    s.image = _setting(ctx, "image", str, s.image)
-    s.idle_minutes = _setting(ctx, "idle_minutes", float, s.idle_minutes)
-    s.idle_days = _setting(ctx, "idle_days", float, s.idle_days)
-    s.memory = _setting(ctx, "memory", str, s.memory)
-    s.cpus = _setting(ctx, "cpus", float, s.cpus)
-    s.docker_host = _setting(ctx, "docker_host", str, s.docker_host)
-    s.hint = _setting(ctx, "hint", bool, s.hint)
+    s = tool.apply_settings(tool.runtime.settings, lambda key, default: ctx.get_config(key, default=default))
     ctx.register_tool(name="runbox", toolset="runbox", schema=tool.SCHEMA, handler=tool.handle)
     ctx.register_hook("pre_tool_call", tool.pre_tool_call)
     ctx.register_hook("pre_llm_call", lambda **kw: guidance.reminder(s.hint, **kw))

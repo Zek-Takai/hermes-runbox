@@ -1,6 +1,7 @@
 """The ``runbox`` tool: schema, handler and the install approval hook."""
 from __future__ import annotations
 
+import contextvars
 import json
 import os
 import shutil
@@ -94,6 +95,26 @@ class Runtime:
 
 
 runtime = Runtime()
+_BY = contextvars.ContextVar("runbox_by", default="agent")  # who started a run: agent or desktop
+
+_SETTING_TYPES = {"image": str, "idle_minutes": float, "idle_days": float, "memory": str, "cpus": float,
+                  "docker_host": str, "hint": bool}
+
+
+def apply_settings(settings: Settings, get) -> Settings:
+    """Fill ``settings`` from ``get(key, default)`` (``ctx.get_config`` or a config dict lookup)."""
+    for key, cast in _SETTING_TYPES.items():
+        default = getattr(settings, key)
+        try:
+            value = get(key, default)
+            if value is None:
+                continue
+            if cast is bool and isinstance(value, str):
+                value = value.strip().lower() in ("1", "true", "yes", "on")
+            setattr(settings, key, cast(value))
+        except Exception:
+            setattr(settings, key, default)
+    return settings
 
 
 def _ok(data) -> str:
@@ -137,8 +158,15 @@ def pre_tool_call(tool_name=None, args=None, **_kw):
 
 # --- handler ---------------------------------------------------------------------------------
 
-def handle(args, session_id=None, task_id=None, **_kw) -> str:
-    args = args or {}
+def handle(args, session_id=None, task_id=None, source="agent", **_kw) -> str:
+    token = _BY.set("desktop" if source == "desktop" else "agent")
+    try:
+        return _handle(args or {}, session_id, task_id)
+    finally:
+        _BY.reset(token)
+
+
+def _handle(args, session_id, task_id) -> str:
     action = (args.get("action") or "").strip()
     sid = str(session_id or task_id or "")
     if action not in ACTIONS:
@@ -191,7 +219,7 @@ def _prepare(sid: str, path: Path, *, container: bool) -> list[str]:
     docker = runtime.engine()
     image = runtime.settings.image
     notes = []
-    with runtime._setup_lock:
+    with runtime._setup_lock, store.locked(runtime.data_root(), ".setup.lock"):
         for step in (docker.ensure_up, lambda: docker.ensure_image(image), lambda: docker.ensure_toolchain(image)):
             note = step()
             if note:
@@ -208,7 +236,7 @@ def _prepare(sid: str, path: Path, *, container: bool) -> list[str]:
 
 def _record(path: Path, action: str, result: dict, *, command: str = "") -> None:
     store.log_run(path, {
-        "ts": time.time(), "action": action, "command": command,
+        "ts": time.time(), "action": action, "command": command, "by": _BY.get(),
         "exit_code": result.get("exit_code"), "duration_ms": result.get("duration_ms"),
         "ok": result.get("ok"), "issues": result.get("issues", [])[:50],
         "output": _clip(result.get("output", ""), 4000),

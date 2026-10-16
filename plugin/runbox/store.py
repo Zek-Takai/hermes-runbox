@@ -191,6 +191,105 @@ def exclusive(root: Path, name: str):
         handle.close()
 
 
+@contextlib.contextmanager
+def locked(root: Path, name: str):
+    """Blocking cross-process lock (one-time setup: VM start, image pull, toolchain install)."""
+    root.mkdir(parents=True, exist_ok=True)
+    with open(root / name, "a+") as handle:
+        try:
+            import fcntl
+        except ImportError:
+            yield
+            return
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+# --- the Desktop tab: chats with a box, and their workspace files ------------------------
+
+MAX_FILE_BYTES = 2 * 1024 * 1024
+
+
+def inventory(root: Path) -> list[dict]:
+    rows = []
+    for entry in session_entries(root):
+        files = workspace_files(entry, limit=0)
+        rows.append({"dir": entry.name, "session_id": entry_session_id(entry),
+                     "last_active": last_active(entry), "files": files["count"]})
+    rows.sort(key=lambda r: r["last_active"], reverse=True)
+    return rows
+
+
+def entry_by_dir(root: Path, dir_name: str) -> Path:
+    if not isinstance(dir_name, str) or not _SAFE_DIR.match(dir_name):
+        raise StoreError(f"invalid session folder {dir_name!r}")
+    entry = sessions_root(root) / dir_name
+    if not entry.is_dir() or not entry_session_id(entry):
+        raise StoreError(f"no runbox folder {dir_name!r}")
+    return entry
+
+
+_SKIP_LISTING = {"__pycache__", ".pytest_cache", ".ruff_cache", ".mypy_cache"}
+
+
+def workspace_files(entry: Path, *, limit: int = 500) -> dict:
+    workspace = entry / "workspace"
+    out, count = [], 0
+    if workspace.is_dir():
+        for p in sorted(workspace.rglob("*")):
+            rel = p.relative_to(workspace)
+            if any(part in _SKIP_LISTING for part in rel.parts) or p.is_symlink() or not p.is_file():
+                continue
+            count += 1
+            if len(out) < limit:
+                out.append({"path": rel.as_posix(), "bytes": p.stat().st_size})
+    return {"count": count, "files": out, "truncated": count > len(out)}
+
+
+def workspace_path(entry: Path, rel: str) -> Path:
+    workspace = (entry / "workspace").resolve()
+    if not isinstance(rel, str) or not rel or rel.startswith("/") or "\\" in rel:
+        raise StoreError(f"invalid file path {rel!r}")
+    target = (workspace / rel).resolve()
+    if target == workspace or workspace not in target.parents:
+        raise StoreError(f"invalid file path {rel!r}")
+    return target
+
+
+def read_file(entry: Path, rel: str) -> dict:
+    path = workspace_path(entry, rel)
+    if not path.is_file():
+        raise StoreError(f"no file {rel!r}")
+    if path.stat().st_size > MAX_FILE_BYTES:
+        raise StoreError(f"{rel} is larger than {MAX_FILE_BYTES} bytes")
+    try:
+        content = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        raise StoreError(f"{rel} is not a text file") from exc
+    return {"path": rel, "content": content, "bytes": path.stat().st_size}
+
+
+def write_file(entry: Path, rel: str, content: str) -> dict:
+    if not isinstance(content, str) or len(content.encode("utf-8")) > MAX_FILE_BYTES:
+        raise StoreError(f"content must be text no larger than {MAX_FILE_BYTES} bytes")
+    path = workspace_path(entry, rel)
+    created = not path.exists()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+    return {"path": rel, "bytes": path.stat().st_size, "created": created}
+
+
+def delete_file(entry: Path, rel: str) -> dict:
+    path = workspace_path(entry, rel)
+    if not path.is_file():
+        raise StoreError(f"no file {rel!r}")
+    path.unlink()
+    return {"path": rel, "deleted": True}
+
+
 def remove_entry(entry: Path) -> None:
     shutil.rmtree(entry, ignore_errors=True)
 

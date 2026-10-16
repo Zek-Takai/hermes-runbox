@@ -236,6 +236,8 @@ class Docker:
                 "-w", "/workspace", image, "sleep", "infinity"]
         proc = self.docker(*argv, timeout=120)
         if proc.returncode != 0:
+            if "already in use" in (proc.stderr or "") and self.container_state(name) == "running":
+                return None  # another caller (the Desktop tab or the agent) created it first
             raise RunboxError("could not start the container: " + _tail(proc.stderr, 800))
         return "started a new container"
 
