@@ -15,7 +15,13 @@ const notifyRefresh = () => refreshListeners.forEach((fn) => fn())
 // The tool announces every action (the agent's too): run.started / runs.updated with { dir, action, by, command }.
 const activityListeners = new Set()
 const notifyActivity = (kind, payload) => activityListeners.forEach((fn) => fn(kind, payload || {}))
+// Auto-open policy: once per chat, only when the agent starts run/check/test; never after the
+// user closed the editor for that chat, and never re-front an editor that is already open.
 const autoOpened = new Set()
+const userClosed = new Set()
+let editorOpen = false
+let editorDir = null
+const AUTO_OPEN_ACTIONS = new Set(['run', 'check', 'test'])
 
 const LINE_PX = 20
 const OK_COLOR = '#3fb950'
@@ -350,6 +356,7 @@ function RunboxEditor() {
   const row =
     (rows || []).find((r) => r.dir === picked) || (rows || []).find((r) => r.session_id === focusedStored || r.session_id === focused) || null
   const dir = row?.dir
+  editorDir = dir || null
 
   const loadFile = useCallback(
     async (path, force = false) => {
@@ -741,12 +748,25 @@ function openEditor() {
     host.notify({ kind: 'error', message: 'runbox needs a newer Hermes Desktop (openWorkspace)' })
     return
   }
+  editorOpen = true
   host.openWorkspace('runbox', {
     title: 'Runbox',
     minWidth: '26rem',
     dock: { pane: 'workspace', pos: 'right' },
-    render: () => jsx(RunboxEditor, {})
+    render: () => jsx(RunboxEditor, {}),
+    onClose: () => {
+      editorOpen = false
+      if (editorDir) userClosed.add(editorDir)
+    }
   })
+}
+
+function maybeAutoOpen(payload) {
+  const dir = payload?.dir
+  if (!dir || payload.by !== 'agent' || !AUTO_OPEN_ACTIONS.has(payload.action)) return
+  if (editorOpen || autoOpened.has(dir) || userClosed.has(dir)) return
+  autoOpened.add(dir)
+  openEditor()
 }
 
 export default {
@@ -755,17 +775,13 @@ export default {
   register(ctx) {
     rest = ctx.rest
     pluginCtx = ctx
-    // Open beside the chat the first time the agent uses runbox in it; refresh on every use.
     ctx.onEvent('tool.complete', (event) => {
-      if (event?.payload?.name !== 'runbox') return
-      const sid = event?.session_id || host.state.focusedSessionId.get() || ''
-      if (!autoOpened.has(sid)) {
-        autoOpened.add(sid)
-        openEditor()
-      }
-      notifyRefresh()
+      if (event?.payload?.name === 'runbox') notifyRefresh()
     })
-    ctx.onEvent('plugin.runbox.run.started', (event) => notifyActivity('started', event?.payload))
+    ctx.onEvent('plugin.runbox.run.started', (event) => {
+      maybeAutoOpen(event?.payload)
+      notifyActivity('started', event?.payload)
+    })
     ctx.onEvent('plugin.runbox.runs.updated', (event) => {
       notifyActivity('finished', event?.payload)
       notifyRefresh()
