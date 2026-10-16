@@ -46,6 +46,13 @@ A typical exchange:
 > If the agent doesn't pick runbox on its own, ask it to "use runbox"; it then keeps using it for
 > the rest of the chat.
 
+### A skill to start from
+
+runbox ships a read-only skill, `runbox:dev-loop`: the full run → check → test → fix loop, how far
+to go for "run this" versus "fix it", when to export, and how to read results. To adapt it, copy
+`plugin/skills/dev-loop/SKILL.md` to `~/.hermes/skills/runbox/SKILL.md` and add your own rules
+(where finished files go, what needs your word).
+
 ### Tool reference
 
 | Action | What it does |
@@ -155,6 +162,7 @@ plugin/              the installable package (catalog subdir)
   plugin.yaml        manifest
   __init__.py        registration, idle stop and cleanup thread
   runbox/            engine (docker/colima), store, issues, tool, lifecycle, guidance
+  skills/dev-loop/   the runbox:dev-loop starting-point skill
   dashboard/         backend routes for the editor (/api/plugins/runbox/)
   desktop/plugin.js  the Runbox editor
 tests/               pytest suite

@@ -479,3 +479,11 @@ def test_reconcile_survives_a_deleted_data_folder(tmp_path, monkeypatch):
     shutil.rmtree(root)
     runbox_plugin._reconcile_once()
     assert (root / ".last_reconcile").exists()
+
+
+def test_dev_loop_skill_is_well_formed():
+    skill = Path(__file__).resolve().parents[1] / "plugin" / "skills" / "dev-loop" / "SKILL.md"
+    head = skill.read_text().split("---")[1]
+    assert "name: dev-loop" in head
+    desc = next(line.split(":", 1)[1].strip() for line in head.splitlines() if line.startswith("description:"))
+    assert len(desc) <= 60

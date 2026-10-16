@@ -65,6 +65,12 @@ def register(ctx):
     ctx.register_tool(name="runbox", toolset="runbox", schema=tool.SCHEMA, handler=tool.handle)
     ctx.register_hook("pre_tool_call", tool.pre_tool_call)
     ctx.register_hook("pre_llm_call", lambda **kw: guidance.reminder(s.hint, **kw))
+    if hasattr(ctx, "register_skill"):  # a starting-point skill: runbox:dev-loop
+        try:
+            ctx.register_skill("dev-loop", Path(__file__).parent / "skills" / "dev-loop" / "SKILL.md",
+                               description="Run, check, test and fix Python in runbox.")
+        except Exception:
+            logger.warning("runbox: could not register the dev-loop skill", exc_info=True)
     if not _threads_started:
         _threads_started = True
         threading.Thread(target=_loop, name="runbox-lifecycle", daemon=True).start()
