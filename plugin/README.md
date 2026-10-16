@@ -12,6 +12,8 @@ main.py:2: ZeroDivisionError division by zero
 In Hermes Desktop it adds a small VS Code-style editor beside the chat: the code on top, and
 PROBLEMS / OUTPUT / RUNS underneath, following what the agent does as it does it.
 
+![runbox in Hermes Desktop: the agent tests a file, fixes it in the box, and the editor follows](https://raw.githubusercontent.com/Zek-Takai/hermes-runbox/main/docs/runbox-demo.gif)
+
 It is not meant to replace an IDE. It is a quick, disposable place to try simple programs, and a
 run/debug console for bigger projects: the agent imports a project, runs and tests it in the box,
 and exports the changes back.
