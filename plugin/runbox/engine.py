@@ -144,7 +144,24 @@ class Docker:
             raise RunboxError("the runbox VM did not start within 15 minutes") from exc
         if proc.returncode != 0 or not self.reachable():
             raise RunboxError("could not start the runbox VM: " + _tail(proc.stderr or proc.stdout, 800))
+        self._wait_for_file_sharing()
         return f"started the runbox VM in {time.monotonic() - started:.0f}s"
+
+    def _wait_for_file_sharing(self, timeout: float = 60) -> None:
+        """Docker can answer before the VM has mounted the home folder; a container created in
+        that window gets empty stand-in folders. Wait until the VM sees the plugin's data folder."""
+        self.data_root.mkdir(parents=True, exist_ok=True)
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                probe = self._call(["colima", "ssh", "-p", COLIMA_PROFILE, "--", "test", "-d", str(self.data_root)],
+                                   timeout=20)
+                if probe.returncode == 0:
+                    return
+            except (subprocess.TimeoutExpired, RunboxError):
+                pass
+            time.sleep(1)
+        raise RunboxError(f"the runbox VM cannot see {self.data_root}; is it under your home folder?")
 
     def stop_vm(self) -> bool:
         if not self.colima:
@@ -180,9 +197,11 @@ class Docker:
             shutil.rmtree(target)
         target.mkdir(parents=True)
         result = self.pip_install(image, target, list(TOOLCHAIN))
-        if result.exit_code != 0:
+        landed = (target / "bin" / "ruff").exists() and (target / "pytest").is_dir()
+        if result.exit_code != 0 or not landed:
             shutil.rmtree(target, ignore_errors=True)
-            raise RunboxError("could not install the checker toolchain: " + _tail(result.stderr or result.stdout, 800))
+            why = (result.stderr or result.stdout) if result.exit_code != 0 else "the files did not reach the host folder"
+            raise RunboxError("could not install the checker toolchain: " + _tail(why, 800))
         marker.write_text(spec + "\n", encoding="utf-8")
         return "installed the checker toolchain (" + ", ".join(TOOLCHAIN) + ")"
 
@@ -216,7 +235,33 @@ class Docker:
         proc = self.docker("inspect", "-f", "{{.State.Status}}", name, timeout=30)
         return proc.stdout.strip() if proc.returncode == 0 else None
 
+    MOUNT_MARKER = ".runbox-mount"
+
+    def mounts_visible(self, name: str, image: str) -> bool:
+        """The container sees this chat's folders and the toolchain (marker files written host-side)."""
+        probe = self.docker("exec", name, "sh", "-c",
+                            f"test -f /opt/runbox/deps/{self.MOUNT_MARKER} && test -f /opt/runbox/tools/.runbox-toolchain",
+                            timeout=30)
+        return probe.returncode == 0
+
     def ensure_container(self, name: str, session_id: str, *, image: str, workspace: Path, deps: Path,
+                         memory: str, cpus: float, attempts: int = 5) -> str | None:
+        (deps / self.MOUNT_MARKER).write_text("runbox\n", encoding="utf-8")
+        recreated = False
+        for attempt in range(attempts):
+            note = self._start_container(name, session_id, image=image, workspace=workspace, deps=deps,
+                                         memory=memory, cpus=cpus)
+            if self.mounts_visible(name, image):
+                if recreated:
+                    return "the container could not see its files; started a fresh one"
+                return note
+            # Stale or not-yet-ready mount (VM file sharing, or a replaced folder): start over.
+            self.remove(name)
+            recreated = True
+            time.sleep(min(2 * (attempt + 1), 6))
+        raise RunboxError("the container cannot see its workspace (VM file sharing is not ready); try again shortly")
+
+    def _start_container(self, name: str, session_id: str, *, image: str, workspace: Path, deps: Path,
                          memory: str, cpus: float) -> str | None:
         state = self.container_state(name)
         if state == "running":

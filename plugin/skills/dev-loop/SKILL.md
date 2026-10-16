@@ -75,7 +75,9 @@ separate installer container). Install only what the code needs.
 
 ## Troubleshooting
 
-- "file not found" for a file `status` lists: compare with `run ls -la /workspace`. An empty
-  container with files on the host means a stale mount: `stop`, then run again.
+- runbox works on copies: nothing done in the box changes the originals. Describe results as the
+  box's copy, and edit the box's files (the workspace path from `sync`/`status`, or `run`).
+- Before every action runbox checks the container can see its files and starts a fresh one if not.
+  If a file `status` lists is still "not found", compare with `run ls -la /workspace` and report it.
 - The Desktop editor (beside the chat) shows the same box: files, Problems, Output and Runs. The
   user can run, check and test there too; their runs appear in the history marked "you".

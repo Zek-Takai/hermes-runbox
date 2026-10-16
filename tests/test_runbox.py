@@ -23,6 +23,7 @@ class FakeDocker(engine.Docker):
         self.replies = {}
         self.up = up
         self.containers = {}
+        self.mounts_ok = True
 
     def socket_present(self):
         return self.up
@@ -36,6 +37,8 @@ class FakeDocker(engine.Docker):
             self.up = False
             return subprocess.CompletedProcess(argv, 0, "", "")
         args = argv[1:]
+        if args[:1] == ["exec"] and ".runbox-mount" in " ".join(args):
+            return subprocess.CompletedProcess(argv, 0 if self.mounts_ok else 1, "", "")
         for prefix, reply in self.replies.items():
             if tuple(args[:len(prefix)]) == prefix:
                 if isinstance(reply, Exception):
@@ -154,6 +157,7 @@ def test_sync_copies_and_guards_paths(rt, tmp_path):
     single.write_text("print(1)\n")
     out = call(action="sync", paths=[str(src), str(single)], files={"t/test_a.py": "def test(): pass\n"})
     assert out["files"] == ["buf.py", "pkg/a.py", "t/test_a.py"]
+    assert "These are copies" in out["note"] and out["workspace"] in out["note"]
     assert call(action="sync", files={"../x.py": "1"})["success"] is False
     assert call(action="sync", paths=["rel/path"])["success"] is False
     assert call(action="sync", clean=True)["files"] == []
@@ -169,7 +173,7 @@ def test_check_reports_ruff_issues(rt):
     assert out["ok"] is False
     assert out["report"] == ["bad.py:1:5: syntax Expected ':', found newline",
                              "broken.py:2:7: F821 Undefined name `undefined_name`"]
-    argv = rt.docker.ran("exec")[0]
+    argv = next(c for c in rt.docker.ran("exec") if "ruff" in c)
     assert "--isolated" in argv and argv[argv.index("--select") + 1] == tool.CHECK_RULES
 
 
@@ -523,3 +527,20 @@ def test_backend_files_carry_origin_and_mtime(rt, monkeypatch, tmp_path):
     listed = {f["path"]: f for f in client.get(f"/sessions/{d}/files").json()["files"]}
     assert listed["main.py"]["origin"].endswith("proj/main.py") and "origin" not in listed["new.py"]
     assert listed["main.py"]["mtime"] > 0
+
+
+def test_container_with_invisible_mounts_is_recreated(rt, monkeypatch):
+    monkeypatch.setattr(engine.time, "sleep", lambda s: None)
+    seen = iter([False, True])
+    rt.docker.mounts_visible = lambda name, image: next(seen)
+    rt.docker.replies[("exec",)] = (0, "ok\n", "")
+    out = call(action="run", command="true")
+    assert out["ok"] and "could not see its files" in " ".join(out["notes"])
+    assert len(rt.docker.ran("rm", "-f")) == 1
+
+
+def test_container_that_never_sees_mounts_gives_a_clear_error(rt, monkeypatch):
+    monkeypatch.setattr(engine.time, "sleep", lambda s: None)
+    rt.docker.mounts_visible = lambda name, image: False
+    out = call(action="run", command="true")
+    assert out["success"] is False and "cannot see its workspace" in out["error"]

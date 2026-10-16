@@ -416,8 +416,11 @@ def _sync(path: Path, args) -> str:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
         written.append(str(_safe_rel(rel)))
-    return _ok({"workspace": str(workspace), "copied": copied, "written": written,
-                "files": _listing(workspace)})
+    result = {"workspace": str(workspace), "copied": copied, "written": written, "files": _listing(workspace)}
+    if copied:
+        result["note"] = (f"These are copies. Work on the box's files (under {workspace}, or with runbox run); "
+                          "the originals stay untouched until the user asks for an export.")
+    return _ok(result)
 
 
 # --- export ----------------------------------------------------------------------------------
